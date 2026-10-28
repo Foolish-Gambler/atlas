@@ -21,7 +21,7 @@ Source lives under `src/atlas` (src layout). Tests live under `tests/`.
 | Paper trading | `atlas.paper_trading` | In-memory simulated broker. The only allowed execution mode. |
 | CLI / status | `atlas.cli`, `atlas.status` | Operator interface. `atlas status` reports mode, modules, and live-broker isolation. |
 
-Shared types live in `atlas.domain`. Process-wide safety (paper-only mode) lives in `atlas.safety` and `atlas.config`.
+Shared runtime types live in `atlas.domain`. Long-lived stream contracts (timestamps, provenance, filings, research, predictions, event clock) live in `atlas.contracts`. Product intent is in `docs/PRODUCT_VISION.md` and `docs/ROADMAP.md`. Process-wide safety (paper-only mode) lives in `atlas.safety` and `atlas.config`.
 
 Pipeline:
 
