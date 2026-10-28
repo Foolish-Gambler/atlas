@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from atlas.domain import DataProvenance
+from atlas.validation import normalize_symbol
 
 _POSITIVE = frozenset({"beat", "growth", "upgrade", "record", "profit"})
 _NEGATIVE = frozenset({"miss", "downgrade", "lawsuit", "fraud", "loss"})
@@ -16,6 +17,9 @@ class NewsItem:
     headline: str
     provenance: DataProvenance = "caller_supplied"
 
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "symbol", normalize_symbol(self.symbol))
+
 
 @dataclass(frozen=True, slots=True)
 class NewsScore:
@@ -24,6 +28,9 @@ class NewsScore:
     label: str
     provenance: DataProvenance
     headline_count: int
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "symbol", normalize_symbol(self.symbol))
 
 
 class NewsAnalyzer:

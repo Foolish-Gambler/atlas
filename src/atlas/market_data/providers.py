@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Protocol
 
 from atlas.market_data.models import Bar, Quote
+from atlas.validation import normalize_symbol, require_positive_finite
 
 SIMULATED_DISCLAIMER = (
     "Simulated fixture data for software tests and paper trading. Not a real market quote."
@@ -26,12 +27,10 @@ class SimulatedMarketDataProvider:
     name = "simulated"
 
     def __init__(self, base_price: float = 100.0) -> None:
-        if base_price <= 0:
-            raise ValueError("base_price must be positive.")
-        self._base_price = base_price
+        self._base_price = require_positive_finite(base_price, "base_price")
 
     def get_quote(self, symbol: str) -> Quote:
-        symbol = _require_symbol(symbol)
+        symbol = normalize_symbol(symbol)
         return Quote(
             symbol=symbol,
             price=self._price_for(symbol),
@@ -41,7 +40,7 @@ class SimulatedMarketDataProvider:
         )
 
     def get_history(self, symbol: str, periods: int) -> list[Bar]:
-        symbol = _require_symbol(symbol)
+        symbol = normalize_symbol(symbol)
         if periods <= 0:
             raise ValueError("periods must be positive.")
         start = datetime(2024, 1, 2, tzinfo=UTC)
@@ -66,10 +65,3 @@ class SimulatedMarketDataProvider:
     def _price_for(self, symbol: str) -> float:
         offset = sum(ord(char) for char in symbol) % 25
         return round(self._base_price + offset, 2)
-
-
-def _require_symbol(symbol: str) -> str:
-    cleaned = symbol.strip().upper()
-    if not cleaned:
-        raise ValueError("symbol is required.")
-    return cleaned

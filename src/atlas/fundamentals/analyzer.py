@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from atlas.domain import DataProvenance
+from atlas.validation import normalize_symbol, require_finite, require_positive_finite
 
 
 @dataclass(frozen=True, slots=True)
@@ -15,6 +16,20 @@ class FinancialSnapshot:
     price: float
     provenance: DataProvenance = "caller_supplied"
 
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "symbol", normalize_symbol(self.symbol))
+        object.__setattr__(self, "price", require_positive_finite(self.price, "price"))
+        object.__setattr__(
+            self,
+            "earnings_per_share",
+            require_finite(self.earnings_per_share, "earnings_per_share"),
+        )
+        object.__setattr__(
+            self,
+            "book_value_per_share",
+            require_finite(self.book_value_per_share, "book_value_per_share"),
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class FundamentalScore:
@@ -24,11 +39,12 @@ class FundamentalScore:
     score: float
     provenance: DataProvenance
 
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "symbol", normalize_symbol(self.symbol))
+
 
 class FundamentalAnalyzer:
     def analyze(self, snapshot: FinancialSnapshot) -> FundamentalScore:
-        if snapshot.price <= 0:
-            raise ValueError("price must be positive.")
         pe = (
             snapshot.price / snapshot.earnings_per_share
             if snapshot.earnings_per_share > 0

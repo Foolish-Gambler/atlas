@@ -6,6 +6,7 @@ import os
 from dataclasses import dataclass
 
 from atlas.domain import TradingMode
+from atlas.validation import InvalidInputError, require_positive_finite
 
 _ALLOWED_MODES = frozenset({TradingMode.PAPER})
 
@@ -22,6 +23,13 @@ class AtlasSettings:
     starting_cash: float = 100_000.0
     live_broker_connected: bool = False
 
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "starting_cash", require_positive_finite(self.starting_cash, "starting_cash")
+        )
+        if self.live_broker_connected:
+            raise InvalidInputError("live_broker_connected must remain False.")
+
     @classmethod
     def load(cls) -> AtlasSettings:
         raw_mode = os.environ.get("ATLAS_TRADING_MODE", TradingMode.PAPER.value)
@@ -35,9 +43,11 @@ class AtlasSettings:
             raise ValueError(
                 "ATLAS_TRADING_MODE cannot enable live trading. Only 'paper' is allowed."
             )
-        starting_cash = float(os.environ.get("ATLAS_STARTING_CASH", "100000"))
-        if starting_cash <= 0:
-            raise ValueError("ATLAS_STARTING_CASH must be positive.")
+        raw_cash = os.environ.get("ATLAS_STARTING_CASH", "100000")
+        try:
+            starting_cash = float(raw_cash)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("ATLAS_STARTING_CASH must be a finite positive number.") from exc
         return cls(
             trading_mode=mode,
             starting_cash=starting_cash,

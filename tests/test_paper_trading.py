@@ -66,7 +66,7 @@ def test_cannot_submit_hold(settings: AtlasSettings) -> None:
         source="test",
     )
     decision = RiskDecision(approved=True, reasons=(), signal=signal)
-    with pytest.raises(SafetyError, match="Hold"):
+    with pytest.raises(SafetyError, match="hold"):
         broker.submit(decision)
 
 
