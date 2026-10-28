@@ -45,6 +45,16 @@ class RiskLimits:
 
 @dataclass(frozen=True, slots=True)
 class RiskDecision:
+    """Outcome of a single `RiskManager.evaluate` call.
+
+    Execution contract:
+    - Only decisions issued by a `RiskManager` (non-empty `decision_id`) exist.
+    - A rejected decision is permanently non-executable, even if the book later
+      would pass the same signal.
+    - An approved decision must still pass a current-book check at submit time.
+    - `decision_id` is the stable idempotency key; it is not Python `id()`.
+    """
+
     approved: bool
     reasons: tuple[str, ...]
     signal: Signal
@@ -56,10 +66,28 @@ class RiskDecision:
             return "approved"
         return "rejected: " + "; ".join(self.reasons)
 
+    @property
+    def executable(self) -> bool:
+        return self.approved and bool(self.decision_id)
+
 
 class RiskManager:
     def __init__(self, limits: RiskLimits | None = None) -> None:
         self.limits = limits or RiskLimits()
+        self._issued: dict[str, RiskDecision] = {}
+        self._consumed: set[str] = set()
+
+    def lookup(self, decision_id: str) -> RiskDecision | None:
+        if not decision_id:
+            return None
+        return self._issued.get(decision_id)
+
+    def is_consumed(self, decision_id: str) -> bool:
+        return bool(decision_id) and decision_id in self._consumed
+
+    def consume(self, decision_id: str) -> None:
+        if decision_id:
+            self._consumed.add(decision_id)
 
     def evaluate(self, signal: Signal, portfolio: PortfolioSnapshot) -> RiskDecision:
         reasons: list[str] = []
@@ -97,9 +125,11 @@ class RiskManager:
                 reasons.append("insufficient cash for buy")
         if signal.side is SignalSide.SELL and signal.quantity > current_qty:
             reasons.append("cannot sell more than the current paper position")
-        return RiskDecision(
+        decision = RiskDecision(
             approved=not reasons,
             reasons=tuple(reasons),
             signal=signal,
             decision_id=uuid.uuid4().hex,
         )
+        self._issued[decision.decision_id] = decision
+        return decision

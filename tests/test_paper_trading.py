@@ -5,7 +5,7 @@ import pytest
 from atlas.config import AtlasSettings
 from atlas.domain import PortfolioSnapshot, Signal, SignalSide, TradingMode
 from atlas.paper_trading import PaperBroker
-from atlas.risk import RiskDecision, RiskManager
+from atlas.risk import RiskDecision
 from atlas.safety import SafetyError
 
 
@@ -20,7 +20,7 @@ def test_paper_broker_fills_only_approved_signals(settings: AtlasSettings) -> No
         rationale="test",
         source="test",
     )
-    decision = RiskManager().evaluate(signal, broker.snapshot())
+    decision = broker.risk.evaluate(signal, broker.snapshot())
     fill = broker.submit(decision)
     assert fill.simulated is True
     assert broker.positions["SIM-A"] == 2
@@ -39,7 +39,7 @@ def test_paper_broker_rejects_unapproved_signals(settings: AtlasSettings) -> Non
         source="test",
     )
     decision = RiskDecision(approved=False, reasons=("low confidence",), signal=signal)
-    with pytest.raises(SafetyError, match="rejected by risk"):
+    with pytest.raises(SafetyError, match="stable identifier"):
         broker.submit(decision)
     assert broker.fills == []
 
@@ -66,7 +66,7 @@ def test_cannot_submit_hold(settings: AtlasSettings) -> None:
         source="test",
     )
     decision = RiskDecision(approved=True, reasons=(), signal=signal)
-    with pytest.raises(SafetyError, match="hold"):
+    with pytest.raises(SafetyError, match="stable identifier"):
         broker.submit(decision)
 
 

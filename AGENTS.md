@@ -26,10 +26,10 @@ Shared types live in `atlas.domain`. Process-wide safety (paper-only mode) lives
 Pipeline:
 
 1. Research modules produce structured artifacts (quotes, news scores, fundamentals, forecasts).
-2. Forecasting emits a `Signal`.
-3. `RiskManager.evaluate` returns an approved or rejected `RiskDecision`.
-4. `PaperBroker.submit` accepts only approved decisions.
-5. Backtests reuse the same risk manager; they never bypass it.
+2. Forecasting emits a `Signal`. `Signal.reference_price` is indicative for risk checks only, not a fill price.
+3. `RiskManager.evaluate` issues a `RiskDecision` with a stable `decision_id`. Rejected IDs are never executable later.
+4. `PaperBroker.submit` accepts only IDs issued by **that broker's** `RiskManager`, re-checks the current book, then applies a broker-controlled simulated fill.
+5. Backtests reuse the same risk manager; they never bypass it. Incomplete marks leave `PortfolioSnapshot.equity` as `None`.
 
 ## Development conventions
 

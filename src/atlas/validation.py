@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from datetime import datetime
 from typing import Any
 
 
@@ -56,4 +57,12 @@ def require_unit_interval(value: Any, name: str) -> float:
 def require_int(value: Any, name: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         raise InvalidInputError(f"{name} must be an integer.")
+    return value
+
+
+def require_aware_datetime(value: Any, name: str) -> datetime:
+    if not isinstance(value, datetime):
+        raise InvalidInputError(f"{name} must be a datetime.")
+    if value.tzinfo is None or value.tzinfo.utcoffset(value) is None:
+        raise InvalidInputError(f"{name} must be timezone-aware.")
     return value

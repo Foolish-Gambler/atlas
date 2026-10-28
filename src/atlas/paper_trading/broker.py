@@ -18,7 +18,12 @@ from atlas.domain import (
 )
 from atlas.risk.manager import RiskDecision, RiskManager
 from atlas.safety import SafetyError, assert_no_live_broker, assert_paper_only
-from atlas.validation import normalize_symbol, require_int, require_non_negative_finite
+from atlas.validation import (
+    normalize_symbol,
+    require_int,
+    require_non_negative_finite,
+    require_positive_finite,
+)
 
 
 def _utc_now() -> datetime:
@@ -35,6 +40,7 @@ class PaperFill:
     fill_id: int = 0
     cash_after: float = 0.0
     risk_decision_id: str = ""
+    reference_price: float = 0.0
 
 
 @dataclass
@@ -46,8 +52,6 @@ class PaperBroker:
     risk: RiskManager = field(default_factory=RiskManager)
     max_mark_age: timedelta | None = None
     _marks: dict[str, PriceMark] = field(default_factory=dict, repr=False)
-    _consumed_decision_ids: set[str] = field(default_factory=set, repr=False)
-    _consumed_object_ids: set[int] = field(default_factory=set, repr=False)
     _next_fill_id: int = field(default=1, repr=False)
     _clock: Callable[[], datetime] = field(default=_utc_now)
 
@@ -105,7 +109,7 @@ class PaperBroker:
                 continue
             market_value += quantity * mark.price
         incomplete = bool(missing or stale)
-        equity = self.cash if incomplete else self.cash + market_value
+        equity = None if incomplete else self.cash + market_value
         return PortfolioSnapshot(
             cash=self.cash,
             positions=dict(self.positions),
@@ -122,28 +126,55 @@ class PaperBroker:
             )
         if snap.stale_marks:
             raise StaleMarkError("Stale mark-to-market prices for: " + ", ".join(snap.stale_marks))
+        if snap.equity is None:
+            raise MissingMarkError("Marked equity is unavailable.")
         return snap.equity
 
-    def submit(self, decision: RiskDecision) -> PaperFill:
+    def simulated_fill_price(self, signal: Signal, fill_price: float | None = None) -> float:
+        """Return the broker-controlled simulated fill.
+
+        `Signal.reference_price` is only a fallback when no current mark exists.
+        """
+
+        if fill_price is not None:
+            return require_positive_finite(fill_price, "fill_price")
+        mark = self._marks.get(signal.symbol)
+        now = self._clock()
+        if mark is not None and not self._is_stale(mark, now):
+            return mark.price
+        return signal.reference_price
+
+    def submit(self, decision: RiskDecision, *, fill_price: float | None = None) -> PaperFill:
         assert_paper_only(self.settings)
-        decision_object_id = id(decision)
-        if decision_object_id in self._consumed_object_ids:
-            raise SafetyError("RiskDecision has already been submitted.")
-        if decision.decision_id and decision.decision_id in self._consumed_decision_ids:
+        issued = self._require_issued(decision)
+        if self.risk.is_consumed(issued.decision_id):
             raise SafetyError("RiskDecision has already been submitted.")
         current = self.snapshot()
-        fresh = self.risk.evaluate(decision.signal, current)
-        if not fresh.approved:
-            raise SafetyError(f"Signal rejected by risk: {fresh.summary}")
-        fill = self._apply(fresh.signal, fresh.decision_id)
-        self._consumed_object_ids.add(decision_object_id)
-        if decision.decision_id:
-            self._consumed_decision_ids.add(decision.decision_id)
-        self._consumed_decision_ids.add(fresh.decision_id)
+        live = self.risk.evaluate(issued.signal, current)
+        if not live.approved:
+            raise SafetyError(f"Signal rejected by risk: {live.summary}")
+        price = self.simulated_fill_price(issued.signal, fill_price)
+        fill = self._apply(issued.signal, issued.decision_id, price)
+        self.risk.consume(issued.decision_id)
         return fill
 
-    def _apply(self, signal: Signal, decision_id: str) -> PaperFill:
-        notional = signal.quantity * signal.reference_price
+    def _require_issued(self, decision: RiskDecision) -> RiskDecision:
+        if not decision.decision_id:
+            raise SafetyError("RiskDecision is missing a stable identifier.")
+        issued = self.risk.lookup(decision.decision_id)
+        if issued is None:
+            raise SafetyError("unknown or forged RiskDecision")
+        if issued.signal != decision.signal:
+            raise SafetyError("RiskDecision signal does not match the issued decision.")
+        if not issued.approved:
+            raise SafetyError("previously rejected RiskDecision cannot be executed")
+        return issued
+
+    def _apply(self, signal: Signal, decision_id: str, fill_price: float) -> PaperFill:
+        fill_price = require_positive_finite(fill_price, "fill_price")
+        notional = signal.quantity * fill_price
+        if notional > self.risk.limits.max_notional:
+            raise SafetyError("fill notional exceeds max_notional")
         if signal.side is SignalSide.BUY:
             if notional > self.cash:
                 raise SafetyError("insufficient cash for buy")
@@ -172,7 +203,7 @@ class PaperBroker:
             {
                 signal.symbol: PriceMark(
                     symbol=signal.symbol,
-                    price=signal.reference_price,
+                    price=fill_price,
                     as_of=self._clock(),
                     provenance="simulated",
                 )
@@ -182,11 +213,12 @@ class PaperBroker:
             symbol=signal.symbol,
             side=signal.side,
             quantity=signal.quantity,
-            price=signal.reference_price,
+            price=fill_price,
             simulated=True,
             fill_id=self._next_fill_id,
             cash_after=self.cash,
             risk_decision_id=decision_id,
+            reference_price=signal.reference_price,
         )
         self._next_fill_id += 1
         self.fills.append(fill)
@@ -195,8 +227,4 @@ class PaperBroker:
     def _is_stale(self, mark: PriceMark, now: datetime) -> bool:
         if self.max_mark_age is None:
             return False
-        as_of = mark.as_of
-        if as_of.tzinfo is None:
-            as_of = as_of.replace(tzinfo=UTC)
-        current = now if now.tzinfo is not None else now.replace(tzinfo=UTC)
-        return current - as_of > self.max_mark_age
+        return now - mark.as_of > self.max_mark_age

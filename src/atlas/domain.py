@@ -9,6 +9,7 @@ from typing import Literal
 
 from atlas.validation import (
     normalize_symbol,
+    require_aware_datetime,
     require_finite,
     require_int,
     require_non_negative_finite,
@@ -56,11 +57,17 @@ class PriceMark:
     def __post_init__(self) -> None:
         object.__setattr__(self, "symbol", normalize_symbol(self.symbol))
         object.__setattr__(self, "price", require_positive_finite(self.price, "price"))
+        object.__setattr__(self, "as_of", require_aware_datetime(self.as_of, "as_of"))
 
 
 @dataclass(frozen=True, slots=True)
 class Signal:
-    """A candidate trade. Never executed until risk approves it."""
+    """A candidate trade. Never executed until risk approves it.
+
+    `reference_price` is an indicative quote for risk notional checks only.
+    It is not an authoritative execution price; `PaperBroker` chooses the
+    simulated fill price (and a later venue adapter would do the same).
+    """
 
     symbol: str
     side: SignalSide
@@ -93,13 +100,12 @@ class Signal:
 class PortfolioSnapshot:
     cash: float
     positions: dict[str, int]
-    equity: float
+    equity: float | None = None
     missing_marks: tuple[str, ...] = ()
     stale_marks: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "cash", require_non_negative_finite(self.cash, "cash"))
-        object.__setattr__(self, "equity", require_finite(self.equity, "equity"))
         normalized: dict[str, int] = {}
         for symbol, quantity in self.positions.items():
             key = normalize_symbol(symbol)
@@ -110,7 +116,12 @@ class PortfolioSnapshot:
                 continue
             normalized[key] = normalized.get(key, 0) + qty
         object.__setattr__(self, "positions", normalized)
+        if self.equity is None:
+            if not self.missing_marks and not self.stale_marks and normalized:
+                raise ValueError("equity is required when all marks are available.")
+        else:
+            object.__setattr__(self, "equity", require_finite(self.equity, "equity"))
 
     @property
     def marked(self) -> bool:
-        return not self.missing_marks and not self.stale_marks
+        return self.equity is not None and not self.missing_marks and not self.stale_marks

@@ -6,7 +6,13 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from atlas.domain import DataProvenance
-from atlas.validation import normalize_symbol, require_int, require_positive_finite
+from atlas.validation import (
+    InvalidInputError,
+    normalize_symbol,
+    require_aware_datetime,
+    require_int,
+    require_positive_finite,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -20,6 +26,7 @@ class Quote:
     def __post_init__(self) -> None:
         object.__setattr__(self, "symbol", normalize_symbol(self.symbol))
         object.__setattr__(self, "price", require_positive_finite(self.price, "price"))
+        object.__setattr__(self, "as_of", require_aware_datetime(self.as_of, "as_of"))
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,6 +42,7 @@ class Bar:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "symbol", normalize_symbol(self.symbol))
+        object.__setattr__(self, "timestamp", require_aware_datetime(self.timestamp, "timestamp"))
         object.__setattr__(self, "open", require_positive_finite(self.open, "open"))
         object.__setattr__(self, "high", require_positive_finite(self.high, "high"))
         object.__setattr__(self, "low", require_positive_finite(self.low, "low"))
@@ -43,3 +51,13 @@ class Bar:
         if volume < 0:
             raise ValueError("volume must be non-negative.")
         object.__setattr__(self, "volume", volume)
+        _validate_ohlc(self.open, self.high, self.low, self.close)
+
+
+def _validate_ohlc(open_: float, high: float, low: float, close: float) -> None:
+    if high < low:
+        raise InvalidInputError("high must be greater than or equal to low.")
+    if high < open_ or high < close:
+        raise InvalidInputError("high must be at least open and close.")
+    if low > open_ or low > close:
+        raise InvalidInputError("low must be at most open and close.")
