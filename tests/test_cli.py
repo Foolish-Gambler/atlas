@@ -158,3 +158,25 @@ def test_alpaca_recorded_ingest_and_paper_demo(tmp_path: Path, capsys, monkeypat
     assert demo["starting_cash"] == 10000.0
     assert demo["fills"] == 1
     assert demo["simulated"] is True
+    assert demo["authenticated_vendor_data"] is False
+    assert demo["retrieval_mode"] == "mocked_http"
+    monkeypatch.delenv("ATLAS_ALLOW_NETWORK", raising=False)
+    assert (
+        main(
+            [
+                "alpaca",
+                "fetch-once",
+                "--root",
+                str(root),
+                "--dataset",
+                "live-should-not-run",
+                "--revision",
+                "blocked",
+                "--start",
+                "2024-01-02",
+                "--end",
+                "2024-01-03",
+            ]
+        )
+        == 2
+    )

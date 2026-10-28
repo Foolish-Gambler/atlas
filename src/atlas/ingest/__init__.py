@@ -1,5 +1,7 @@
 from atlas.ingest.alpaca import (
     ADAPTER_VERSION,
+    RETRIEVAL_MOCKED_HTTP,
+    RETRIEVAL_VENDOR_GET,
     AlpacaBarQuery,
     AlpacaBarsAdapter,
     AlpacaIngestResult,
@@ -21,6 +23,8 @@ from atlas.ingest.snapshot import (
 
 __all__ = [
     "ADAPTER_VERSION",
+    "RETRIEVAL_MOCKED_HTTP",
+    "RETRIEVAL_VENDOR_GET",
     "AlpacaBarQuery",
     "AlpacaBarsAdapter",
     "AlpacaIngestResult",

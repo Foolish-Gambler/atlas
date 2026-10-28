@@ -73,7 +73,13 @@ def test_pagination_and_get_only(alpaca_env: None, tmp_path: Path) -> None:
     assert log[1].url.params["page_token"] == "page-2"
     assert "test-secret" not in str(result.manifest.to_dict())
     assert result.execution_eligible is True
+    assert result.simulated is True
+    assert result.authenticated_vendor_data is False
+    assert result.retrieval_mode == "mocked_http"
+    assert result.manifest.metadata["authenticated_vendor_data"] is False
+    assert "Mocked HTTP fixture" in result.manifest.metadata["price_disclaimer"]
     assert result.manifest.vendor == "alpaca"
+    assert result.manifest.source_kind.value == "simulated"
     bars = result.bars
     assert len(bars) == 2
     first = bars[0]
@@ -83,6 +89,12 @@ def test_pagination_and_get_only(alpaca_env: None, tmp_path: Path) -> None:
     assert first.close == 101.2
     assert first.open == 100.0
     assert first.vendor_time is not None
+    assert first.requires_open_interval_evidence is True
+    assert "open_is_one_minute_bucket" in first.quality_flags
+    loaded = store.load("alpaca-aapl", "mock-min")
+    assert loaded.manifest.metadata["retrieval_mode"] == "mocked_http"
+    assert loaded.all_bars()[0].session_open_verified is True
+    assert loaded.all_bars()[0].quality_flags == first.quality_flags
     with pytest.raises(RevisionExistsError):
         adapter.ingest(store, dataset_id="alpaca-aapl", revision="mock-min", query=query)
 
@@ -198,3 +210,115 @@ def test_duplicate_daily_rejected(alpaca_env: None, tmp_path: Path) -> None:
             revision="1",
             query=AlpacaBarQuery(start=date(2024, 1, 2), end=date(2024, 1, 2), timeframe="1Day"),
         )
+
+
+def test_late_first_minute_is_not_a_verified_open(alpaca_env: None, tmp_path: Path) -> None:
+    pages = [
+        {
+            "bars": [
+                {"t": "2024-01-02T14:45:00Z", "o": 99.0, "h": 99.5, "l": 98.5, "c": 99.2, "v": 10},
+                {
+                    "t": "2024-01-02T20:59:00Z",
+                    "o": 100.0,
+                    "h": 100.1,
+                    "l": 99.9,
+                    "c": 100.0,
+                    "v": 10,
+                },
+                {
+                    "t": "2024-01-03T14:30:00Z",
+                    "o": 102.0,
+                    "h": 102.2,
+                    "l": 101.8,
+                    "c": 102.0,
+                    "v": 10,
+                },
+                {
+                    "t": "2024-01-03T20:59:00Z",
+                    "o": 103.0,
+                    "h": 103.1,
+                    "l": 102.9,
+                    "c": 103.0,
+                    "v": 10,
+                },
+            ],
+            "next_page_token": None,
+        }
+    ]
+    result = adapter_for_tests(_handler(pages)).ingest(
+        SnapshotStore(tmp_path),
+        dataset_id="late-open",
+        revision="1",
+        query=AlpacaBarQuery(start=date(2024, 1, 2), end=date(2024, 1, 3), timeframe="1Min"),
+    )
+    first, second = result.bars
+    assert first.session_open_verified is False
+    assert "open_interval_missing" in first.quality_flags
+    assert first.observed_open_time is not None
+    assert first.observed_open_time.hour == 9 and first.observed_open_time.minute == 45
+    assert first.expected_open_time is not None
+    assert first.expected_open_time.minute == 30
+    assert second.session_open_verified is True
+    demo = run_virtual_portfolio(SnapshotStore(tmp_path).load("late-open", "1"), run_id="late")
+    fill = next(row for row in demo.result.journal.records if row["type"] == "fill")
+    assert fill["fill_price"] == 102.0
+    assert "09:45" not in fill["execution_time"]
+
+
+def test_zero_volume_open_interval_is_unverified(alpaca_env: None, tmp_path: Path) -> None:
+    pages = [
+        {
+            "bars": [
+                {
+                    "t": "2024-01-02T14:30:00Z",
+                    "o": 100.0,
+                    "h": 100.0,
+                    "l": 100.0,
+                    "c": 100.0,
+                    "v": 0,
+                },
+                {
+                    "t": "2024-01-02T20:59:00Z",
+                    "o": 101.0,
+                    "h": 101.0,
+                    "l": 101.0,
+                    "c": 101.0,
+                    "v": 5,
+                },
+            ],
+            "next_page_token": None,
+        }
+    ]
+    result = adapter_for_tests(_handler(pages)).ingest(
+        SnapshotStore(tmp_path),
+        dataset_id="zero-open",
+        revision="1",
+        query=AlpacaBarQuery(start=date(2024, 1, 2), end=date(2024, 1, 2), timeframe="1Min"),
+    )
+    bar = result.bars[0]
+    assert bar.session_open_verified is False
+    assert "open_interval_zero_volume" in bar.quality_flags
+    assert result.execution_eligible is False
+    quality = result.manifest.metadata["session_quality"][0]
+    assert quality["open_interval_observed"] is True
+    assert quality["open_volume"] == 0
+    assert quality["execution_eligible"] is False
+
+
+def test_unsupported_calendar_year_is_rejected() -> None:
+    from atlas.market_data.nyse import UnsupportedCalendarError
+
+    with pytest.raises(UnsupportedCalendarError, match="2024"):
+        AlpacaBarQuery(start=date(2023, 1, 3), end=date(2023, 1, 4), timeframe="1Min")
+
+
+def test_trading_endpoints_are_forbidden(alpaca_env: None) -> None:
+    http = ReadOnlyHttp(
+        allowed_host="data.alpaca.markets",
+        client=httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(200))),
+        allow_network=False,
+        rate_limit_sleep=0.0,
+        sleeper=lambda _delay: None,
+    )
+    with pytest.raises(ReadOnlyHttpError, match="forbidden"):
+        http.get("https://api.alpaca.markets/v2/orders")

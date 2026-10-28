@@ -21,6 +21,8 @@ class PaperPortfolioReport:
     simulated: bool
     execution_eligible: bool
     price_disclaimer: str
+    retrieval_mode: str = "unknown"
+    authenticated_vendor_data: bool = False
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -34,6 +36,8 @@ class PaperPortfolioReport:
             "simulated": self.simulated,
             "execution_eligible": self.execution_eligible,
             "price_disclaimer": self.price_disclaimer,
+            "retrieval_mode": self.retrieval_mode,
+            "authenticated_vendor_data": self.authenticated_vendor_data,
         }
 
 
@@ -43,6 +47,9 @@ def report_from_fills(
     *,
     execution_eligible: bool,
     price_disclaimer: str,
+    retrieval_mode: str = "unknown",
+    authenticated_vendor_data: bool = False,
+    simulated: bool = True,
 ) -> PaperPortfolioReport:
     cost_basis = 0.0
     remaining = dict(result.ending_positions)
@@ -84,9 +91,11 @@ def report_from_fills(
         realized_pnl=realized,
         unrealized_pnl=unrealized,
         fills=result.fills,
-        simulated=True,
+        simulated=simulated,
         execution_eligible=execution_eligible,
         price_disclaimer=price_disclaimer,
+        retrieval_mode=retrieval_mode,
+        authenticated_vendor_data=authenticated_vendor_data,
     )
 
 

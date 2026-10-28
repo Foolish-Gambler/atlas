@@ -312,7 +312,11 @@ class PitBacktestEngine:
 
 
 def _is_eligible_open(pending: _Pending, bar: MarketBarRecord) -> bool:
-    return bar.symbol == pending.symbol and bar.open_time > pending.decision_time
+    if bar.symbol != pending.symbol or bar.open_time <= pending.decision_time:
+        return False
+    if bar.requires_open_interval_evidence and not bar.session_open_verified:
+        return False
+    return True
 
 
 def _assert_monotonic(events: tuple[StreamEvent, ...]) -> None:

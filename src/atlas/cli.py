@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 from atlas.backtesting import NextOpenBuyStrategy, PitBacktestEngine
+from atlas.ingest.http import NetworkDisabledError
 from atlas.ingest.snapshot import SnapshotStore
 from atlas.status import collect_status
 
@@ -52,6 +53,15 @@ def build_parser() -> argparse.ArgumentParser:
     ingest.add_argument("--start", default="2024-01-01")
     ingest.add_argument("--end", default="2025-12-31")
     ingest.add_argument("--symbol", default="AAPL")
+    fetch = alpaca_sub.add_parser(
+        "fetch-once",
+        help="One-off read-only GET. Requires ATLAS_ALLOW_NETWORK. Never called in CI.",
+    )
+    _add_snapshot_ids(fetch, require_ids=True)
+    fetch.add_argument("--timeframe", default="1Min", choices=("1Min", "1Day"))
+    fetch.add_argument("--start", default="2024-01-01")
+    fetch.add_argument("--end", default="2025-12-31")
+    fetch.add_argument("--symbol", default="AAPL")
 
     paper = subparsers.add_parser("paper", help="Paper-only virtual portfolio helpers.")
     paper_sub = paper.add_subparsers(dest="paper_command", required=True)
@@ -78,7 +88,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "snapshot":
         return _snapshot_command(args)
     if args.command == "alpaca":
-        return _alpaca_command(args)
+        try:
+            return _alpaca_command(args)
+        except NetworkDisabledError as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
     if args.command == "paper":
         return _paper_command(args)
     parser.print_help()
@@ -154,8 +168,49 @@ def _alpaca_command(args: argparse.Namespace) -> int:
 
     import httpx
 
-    from atlas.ingest.alpaca import AlpacaBarQuery, adapter_for_tests
+    from atlas.ingest.alpaca import (
+        RETRIEVAL_MOCKED_HTTP,
+        RETRIEVAL_VENDOR_GET,
+        AlpacaBarQuery,
+        AlpacaBarsAdapter,
+        adapter_for_tests,
+    )
+    from atlas.ingest.http import NetworkDisabledError, network_allowed
 
+    if args.alpaca_command == "fetch-once":
+        if not network_allowed():
+            raise NetworkDisabledError(
+                "atlas alpaca fetch-once requires ATLAS_ALLOW_NETWORK=1 after explicit approval."
+            )
+        query = AlpacaBarQuery(
+            symbol=args.symbol,
+            start=date.fromisoformat(args.start),
+            end=date.fromisoformat(args.end),
+            timeframe=args.timeframe,
+        )
+        result = AlpacaBarsAdapter().ingest(
+            SnapshotStore(args.root),
+            dataset_id=args.dataset,
+            revision=args.revision,
+            query=query,
+            retrieval_mode=RETRIEVAL_VENDOR_GET,
+        )
+        print(
+            json.dumps(
+                {
+                    "status": "created",
+                    "dataset_id": result.manifest.dataset_id,
+                    "revision": result.manifest.revision,
+                    "execution_eligible": result.execution_eligible,
+                    "retrieval_mode": result.retrieval_mode,
+                    "authenticated_vendor_data": result.authenticated_vendor_data,
+                    "mocked_http": False,
+                    "simulated": False,
+                },
+                indent=2,
+            )
+        )
+        return 0
     if args.alpaca_command != "ingest-recorded":
         return 1
     pages = json.loads(Path(args.recorded).read_text(encoding="utf-8"))
@@ -191,8 +246,10 @@ def _alpaca_command(args: argparse.Namespace) -> int:
                 "revision": result.manifest.revision,
                 "execution_eligible": result.execution_eligible,
                 "missing_sessions": list(result.missing_sessions),
-                "simulated": False,
-                "mocked_http": True,
+                "retrieval_mode": result.retrieval_mode,
+                "authenticated_vendor_data": result.authenticated_vendor_data,
+                "simulated": result.simulated,
+                "mocked_http": result.retrieval_mode == RETRIEVAL_MOCKED_HTTP,
             },
             indent=2,
         )

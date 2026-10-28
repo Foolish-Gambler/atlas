@@ -65,7 +65,7 @@ atlas snapshot replay --root DIR --dataset ID --revision REV
 
 Replay uses `PitBacktestEngine` and `PaperBroker` only. It does not fetch data or place live orders.
 
-Vendor snapshots from **1Day** Alpaca aggregates set `metadata.execution_eligible` to false: the vendor timestamp is not an RTH open. Use **1Min** RTH aggregation for paper fills.
+Alpaca **1Day** aggregates are never execution-eligible. **1Min** sessions are eligible only when the 09:30 ET interval is present with volume. A 09:30 minute bar is a one-minute bucket, not a 09:30:00 print. Mocked HTTP snapshots use `retrieval_mode=mocked_http` and `authenticated_vendor_data=false`.
 
 ```text
 atlas alpaca ingest-recorded --root DIR --dataset ID --revision REV --recorded PATH

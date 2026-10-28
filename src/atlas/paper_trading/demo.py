@@ -88,11 +88,16 @@ def run_virtual_portfolio(
         run_id=run_id,
     )
     fills = [row for row in result.journal.records if row["type"] == "fill"]
-    disclaimer = str(source.manifest.metadata.get("price_disclaimer", _DEMO_DISCLAIMER))
+    meta = source.manifest.metadata
+    disclaimer = str(meta.get("price_disclaimer", _DEMO_DISCLAIMER))
+    authenticated = bool(meta.get("authenticated_vendor_data", False))
     report = report_from_fills(
         result,
         fills,
         execution_eligible=True,
         price_disclaimer=disclaimer,
+        retrieval_mode=str(meta.get("retrieval_mode", "unknown")),
+        authenticated_vendor_data=authenticated,
+        simulated=not authenticated,
     )
     return VirtualPortfolioDemo(result=result, report=report)

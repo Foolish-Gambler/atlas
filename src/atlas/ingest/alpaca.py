@@ -6,7 +6,7 @@ import math
 import os
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 from urllib.parse import urlencode
 
@@ -15,10 +15,18 @@ import httpx
 from atlas.contracts import MarketBarRecord, Provenance, SourceKind
 from atlas.ingest.http import ALPACA_DATA_HOST, ReadOnlyHttp
 from atlas.ingest.snapshot import SnapshotManifest, SnapshotPayload, SnapshotStore
-from atlas.market_data.nyse import EASTERN, NyseCalendar
+from atlas.market_data.nyse import (
+    EASTERN,
+    SUPPORTED_YEARS,
+    NyseCalendar,
+    NyseSession,
+    UnsupportedCalendarError,
+)
 from atlas.validation import InvalidInputError, normalize_symbol, require_finite
 
 ADAPTER_VERSION = "atlas.alpaca.bars.v1"
+RETRIEVAL_MOCKED_HTTP = "mocked_http"
+RETRIEVAL_VENDOR_GET = "vendor_get"
 DEFAULT_SYMBOL = "AAPL"
 DEFAULT_START = date(2024, 1, 1)
 DEFAULT_END = date(2025, 12, 31)
@@ -57,6 +65,11 @@ class AlpacaBarQuery:
             raise InvalidInputError("M2 alpaca ingest supports adjustment=raw only.")
         if self.end < self.start:
             raise InvalidInputError("end cannot precede start.")
+        if self.start.year not in SUPPORTED_YEARS or self.end.year not in SUPPORTED_YEARS:
+            raise UnsupportedCalendarError(
+                "Alpaca ingest query must stay within the maintained NYSE calendar years "
+                f"{sorted(SUPPORTED_YEARS)}."
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,7 +88,9 @@ class AlpacaIngestResult:
     bars: tuple[MarketBarRecord, ...]
     missing_sessions: tuple[str, ...]
     execution_eligible: bool
-    simulated: bool = False
+    retrieval_mode: str
+    authenticated_vendor_data: bool
+    simulated: bool
 
 
 def load_alpaca_credentials() -> tuple[str, str]:
@@ -146,50 +161,43 @@ class AlpacaBarsAdapter:
         revision: str,
         query: AlpacaBarQuery | None = None,
         created_at: datetime | None = None,
+        retrieval_mode: str = RETRIEVAL_MOCKED_HTTP,
     ) -> AlpacaIngestResult:
         query = query or AlpacaBarQuery()
+        if retrieval_mode not in {RETRIEVAL_MOCKED_HTTP, RETRIEVAL_VENDOR_GET}:
+            raise InvalidInputError("retrieval_mode must be mocked_http or vendor_get.")
+        mocked = retrieval_mode == RETRIEVAL_MOCKED_HTTP
         ingested_at = created_at or datetime.now(UTC)
         raw_rows = self.fetch_bars(query)
         raw = [_parse_vendor_bar(row) for row in raw_rows]
         provenance = Provenance(
-            source_kind=SourceKind.VENDOR_READ_ONLY,
+            source_kind=SourceKind.SIMULATED if mocked else SourceKind.VENDOR_READ_ONLY,
             dataset_id=dataset_id,
             revision=revision,
             vendor="alpaca",
         )
         if query.timeframe == "1Min":
-            bars, missing, eligible = _from_minutes(
+            bars, missing, qualities = _from_minutes(
                 raw, query, provenance, ingested_at, self.calendar
             )
         else:
-            bars, missing, eligible = _from_daily(
+            bars, missing, qualities = _from_daily(
                 raw, query, provenance, ingested_at, self.calendar
             )
-        metadata = {
-            "vendor": "alpaca",
-            "adapter_version": ADAPTER_VERSION,
-            "feed": query.feed,
-            "adjustment": query.adjustment,
-            "currency": query.currency,
-            "timeframe": query.timeframe,
-            "symbol": query.symbol,
-            "start": query.start.isoformat(),
-            "end": query.end.isoformat(),
-            "host": ALPACA_DATA_HOST,
-            "method": "GET",
-            "path": _BARS_PATH.format(symbol=query.symbol),
-            "execution_eligible": eligible,
-            "missing_sessions": list(missing),
-            "price_disclaimer": (
-                "Vendor historical bars ingested through a read-only adapter. "
-                "Mocked HTTP responses are not actual historical prices."
-            ),
-        }
+        eligible = any(item["execution_eligible"] for item in qualities)
+        metadata = _ingest_metadata(
+            query,
+            missing=missing,
+            qualities=qualities,
+            eligible=eligible,
+            mocked=mocked,
+            ingested_at=ingested_at,
+        )
         manifest = store.create(
             dataset_id,
             revision,
             SnapshotPayload(bars=tuple(bars)),
-            source_kind=SourceKind.VENDOR_READ_ONLY,
+            source_kind=provenance.source_kind,
             vendor="alpaca",
             created_at=ingested_at,
             metadata=metadata,
@@ -199,7 +207,9 @@ class AlpacaBarsAdapter:
             bars=tuple(bars),
             missing_sessions=missing,
             execution_eligible=eligible,
-            simulated=False,
+            retrieval_mode=retrieval_mode,
+            authenticated_vendor_data=not mocked,
+            simulated=mocked,
         )
 
     def _auth_headers(self) -> dict[str, str]:
@@ -261,7 +271,7 @@ def _from_daily(
     provenance: Provenance,
     ingested_at: datetime,
     calendar: NyseCalendar,
-) -> tuple[list[MarketBarRecord], tuple[str, ...], bool]:
+) -> tuple[list[MarketBarRecord], tuple[str, ...], list[dict[str, Any]]]:
     by_session: dict[date, _RawBar] = {}
     for bar in raw:
         labeled = bar.vendor_time.astimezone(EASTERN).date()
@@ -276,27 +286,44 @@ def _from_daily(
     expected = {session.session_date for session in calendar.sessions(query.start, query.end)}
     missing = tuple(sorted(day.isoformat() for day in expected - set(by_session)))
     records = []
+    qualities: list[dict[str, Any]] = []
     for day, bar in sorted(by_session.items()):
         session = calendar.session_on(day)
         assert session is not None
+        flags = (
+            "daily_aggregate_unverified_open",
+            "open_is_not_rth_print",
+            "execution_unsuitable",
+        )
         records.append(
-            MarketBarRecord(
-                symbol=query.symbol,
-                open_time=session.open,
-                close_time=session.close,
-                available_time=session.close,
-                provenance=provenance,
-                open=bar.open,
+            _session_bar(
+                query.symbol,
+                session,
+                provenance,
+                ingested_at,
+                open_px=bar.open,
                 high=bar.high,
                 low=bar.low,
                 close=bar.close,
                 volume=bar.volume,
-                ingested_time=ingested_at,
                 vendor_time=bar.vendor_time,
-                session_open_verified=False,
+                verified=False,
+                observed_open=None,
+                flags=flags,
             )
         )
-    return records, missing, False
+        qualities.append(
+            _quality_row(
+                session,
+                observed_open=None,
+                observed_last=None,
+                open_interval_observed=False,
+                open_volume=None,
+                verified=False,
+                flags=flags,
+            )
+        )
+    return records, missing, qualities
 
 
 def _from_minutes(
@@ -305,7 +332,7 @@ def _from_minutes(
     provenance: Provenance,
     ingested_at: datetime,
     calendar: NyseCalendar,
-) -> tuple[list[MarketBarRecord], tuple[str, ...], bool]:
+) -> tuple[list[MarketBarRecord], tuple[str, ...], list[dict[str, Any]]]:
     grouped: dict[date, list[_RawBar]] = {}
     for bar in raw:
         local = bar.vendor_time.astimezone(EASTERN)
@@ -316,6 +343,7 @@ def _from_minutes(
     expected = {session.session_date for session in calendar.sessions(query.start, query.end)}
     missing = tuple(sorted(day.isoformat() for day in expected - set(grouped)))
     records = []
+    qualities: list[dict[str, Any]] = []
     for day, rows in sorted(grouped.items()):
         session = calendar.session_on(day)
         assert session is not None
@@ -324,24 +352,153 @@ def _from_minutes(
         if len(times) != len(set(times)):
             raise AlpacaIntegrityError(f"duplicate minute bars for {day.isoformat()}")
         first, last = ordered[0], ordered[-1]
+        opening = [item for item in ordered if item.vendor_time.astimezone(EASTERN) == session.open]
+        flags: list[str] = ["open_is_one_minute_bucket"]
+        open_interval_observed = bool(opening)
+        open_volume = opening[0].volume if opening else None
+        if not opening:
+            flags.append("open_interval_missing")
+        elif open_volume == 0:
+            flags.append("open_interval_zero_volume")
+        last_expected = session.close - timedelta(minutes=1)
+        if last.vendor_time.astimezone(EASTERN) != last_expected:
+            flags.append("session_incomplete")
+        verified = bool(opening) and (open_volume or 0) > 0
+        if not verified:
+            flags.append("execution_unsuitable")
+        open_px = opening[0].open if verified else first.open
         records.append(
-            MarketBarRecord(
-                symbol=query.symbol,
-                open_time=first.vendor_time.astimezone(EASTERN),
-                close_time=session.close,
-                available_time=session.close,
-                provenance=provenance,
-                open=first.open,
+            _session_bar(
+                query.symbol,
+                session,
+                provenance,
+                ingested_at,
+                open_px=open_px,
                 high=max(item.high for item in ordered),
                 low=min(item.low for item in ordered),
                 close=last.close,
                 volume=sum(item.volume for item in ordered),
-                ingested_time=ingested_at,
                 vendor_time=first.vendor_time,
-                session_open_verified=True,
+                verified=verified,
+                observed_open=first.vendor_time.astimezone(EASTERN),
+                flags=tuple(flags),
             )
         )
-    return records, missing, True
+        qualities.append(
+            _quality_row(
+                session,
+                observed_open=first.vendor_time.astimezone(EASTERN),
+                observed_last=last.vendor_time.astimezone(EASTERN),
+                open_interval_observed=open_interval_observed,
+                open_volume=open_volume,
+                verified=verified,
+                flags=tuple(flags),
+            )
+        )
+    return records, missing, qualities
+
+
+def _session_bar(
+    symbol: str,
+    session: NyseSession,
+    provenance: Provenance,
+    ingested_at: datetime,
+    *,
+    open_px: float,
+    high: float,
+    low: float,
+    close: float,
+    volume: int,
+    vendor_time: datetime,
+    verified: bool,
+    observed_open: datetime | None,
+    flags: tuple[str, ...],
+) -> MarketBarRecord:
+    return MarketBarRecord(
+        symbol=symbol,
+        open_time=session.open if verified else (observed_open or session.open),
+        close_time=session.close,
+        available_time=session.close,
+        provenance=provenance,
+        open=open_px,
+        high=high,
+        low=low,
+        close=close,
+        volume=volume,
+        ingested_time=ingested_at,
+        vendor_time=vendor_time,
+        session_open_verified=verified,
+        requires_open_interval_evidence=True,
+        expected_open_time=session.open,
+        observed_open_time=observed_open,
+        quality_flags=flags,
+    )
+
+
+def _quality_row(
+    session: NyseSession,
+    *,
+    observed_open: datetime | None,
+    observed_last: datetime | None,
+    open_interval_observed: bool,
+    open_volume: int | None,
+    verified: bool,
+    flags: tuple[str, ...],
+) -> dict[str, Any]:
+    return {
+        "session_date": session.session_date.isoformat(),
+        "expected_open": session.open.isoformat(),
+        "expected_close": session.close.isoformat(),
+        "observed_open": observed_open.isoformat() if observed_open else None,
+        "observed_last": observed_last.isoformat() if observed_last else None,
+        "open_interval_observed": open_interval_observed,
+        "open_volume": open_volume,
+        "session_open_verified": verified,
+        "execution_eligible": verified,
+        "flags": list(flags),
+    }
+
+
+def _ingest_metadata(
+    query: AlpacaBarQuery,
+    *,
+    missing: tuple[str, ...],
+    qualities: list[dict[str, Any]],
+    eligible: bool,
+    mocked: bool,
+    ingested_at: datetime,
+) -> dict[str, Any]:
+    if mocked:
+        disclaimer = (
+            "Mocked HTTP fixture. Not authenticated Alpaca market data and not a live quote. "
+            "A 09:30 ET minute bar is a one-minute bucket, not a 09:30:00 print."
+        )
+    else:
+        disclaimer = (
+            "Read-only Alpaca historical GET. Not a live quote. "
+            "A 09:30 ET minute bar is a one-minute bucket, not a guaranteed 09:30:00 print."
+        )
+    return {
+        "vendor": "alpaca",
+        "adapter_version": ADAPTER_VERSION,
+        "retrieval_mode": RETRIEVAL_MOCKED_HTTP if mocked else RETRIEVAL_VENDOR_GET,
+        "authenticated_vendor_data": not mocked,
+        "feed": query.feed,
+        "adjustment": query.adjustment,
+        "currency": query.currency,
+        "timeframe": query.timeframe,
+        "symbol": query.symbol,
+        "start": query.start.isoformat(),
+        "end": query.end.isoformat(),
+        "host": ALPACA_DATA_HOST,
+        "method": "GET",
+        "path": _BARS_PATH.format(symbol=query.symbol),
+        "ingested_at": ingested_at.isoformat(),
+        "execution_eligible": eligible,
+        "missing_sessions": list(missing),
+        "session_quality": qualities,
+        "price_disclaimer": disclaimer,
+    }
 
 
 def redacted_query_url(query: AlpacaBarQuery) -> str:

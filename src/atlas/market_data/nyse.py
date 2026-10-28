@@ -7,6 +7,12 @@ from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 EASTERN = ZoneInfo("America/New_York")
+SUPPORTED_YEARS = frozenset({2024, 2025})
+
+
+class UnsupportedCalendarError(ValueError):
+    """Holiday/early-close tables are maintained only for listed years."""
+
 
 _HOLIDAYS = frozenset(
     {
@@ -71,6 +77,7 @@ class NyseCalendar:
         return day.weekday() >= 5
 
     def session_on(self, day: date) -> NyseSession | None:
+        _require_supported_year(day)
         if self.is_weekend(day) or self.is_holiday(day):
             return None
         early = day in _EARLY_CLOSE
@@ -85,6 +92,8 @@ class NyseCalendar:
     def sessions(self, start: date, end: date) -> tuple[NyseSession, ...]:
         if end < start:
             raise ValueError("end cannot precede start.")
+        _require_supported_year(start)
+        _require_supported_year(end)
         out: list[NyseSession] = []
         cursor = start
         while cursor <= end:
@@ -93,3 +102,12 @@ class NyseCalendar:
                 out.append(session)
             cursor += timedelta(days=1)
         return tuple(out)
+
+
+def _require_supported_year(day: date) -> None:
+    if day.year not in SUPPORTED_YEARS:
+        supported = ", ".join(str(year) for year in sorted(SUPPORTED_YEARS))
+        raise UnsupportedCalendarError(
+            f"NYSE calendar has no maintained holidays/early closes for {day.year}; "
+            f"supported years: {supported}."
+        )

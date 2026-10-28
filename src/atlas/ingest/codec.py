@@ -59,7 +59,15 @@ def bar_to_row(bar: MarketBarRecord) -> dict[str, Any]:
         "close": bar.close,
         "volume": bar.volume,
         "session_open_verified": bar.session_open_verified,
+        "requires_open_interval_evidence": bar.requires_open_interval_evidence,
         "vendor_time": bar.vendor_time.isoformat() if bar.vendor_time is not None else None,
+        "expected_open_time": (
+            bar.expected_open_time.isoformat() if bar.expected_open_time is not None else None
+        ),
+        "observed_open_time": (
+            bar.observed_open_time.isoformat() if bar.observed_open_time is not None else None
+        ),
+        "quality_flags": list(bar.quality_flags),
     }
 
 
@@ -85,6 +93,18 @@ def parse_bar(
             parse_datetime(row["vendor_time"], "vendor_time") if row.get("vendor_time") else None
         ),
         session_open_verified=bool(row.get("session_open_verified", False)),
+        requires_open_interval_evidence=bool(row.get("requires_open_interval_evidence", False)),
+        expected_open_time=(
+            parse_datetime(row["expected_open_time"], "expected_open_time")
+            if row.get("expected_open_time")
+            else None
+        ),
+        observed_open_time=(
+            parse_datetime(row["observed_open_time"], "observed_open_time")
+            if row.get("observed_open_time")
+            else None
+        ),
+        quality_flags=tuple(row.get("quality_flags") or ()),
     )
 
 

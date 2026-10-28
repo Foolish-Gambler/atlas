@@ -10,6 +10,7 @@ from urllib.parse import urlparse
 import httpx
 
 ALPACA_DATA_HOST = "data.alpaca.markets"
+_BLOCKED_HOSTS = frozenset({"api.alpaca.markets", "paper-api.alpaca.markets"})
 
 
 class NetworkDisabledError(RuntimeError):
@@ -67,8 +68,12 @@ class ReadOnlyHttp:
         headers: Mapping[str, str] | None = None,
     ) -> httpx.Response:
         parsed = urlparse(url)
-        if parsed.scheme != "https" or parsed.hostname != self.allowed_host:
-            raise ReadOnlyHttpError(f"GET host {parsed.hostname!r} is not allowed.")
+        host = parsed.hostname or ""
+        path = parsed.path.lower()
+        if host in _BLOCKED_HOSTS or "/orders" in path or "/v2/account" in path:
+            raise ReadOnlyHttpError("trading and account endpoints are forbidden.")
+        if parsed.scheme != "https" or host != self.allowed_host:
+            raise ReadOnlyHttpError(f"GET host {host!r} is not allowed.")
         last_error: Exception | None = None
         for attempt in range(self.max_retries):
             if self.rate_limit_sleep and attempt == 0:

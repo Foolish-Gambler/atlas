@@ -66,6 +66,8 @@ def test_virtual_cash_accounting_and_determinism(alpaca_env: None, tmp_path: Pat
     assert first.report.unrealized_pnl == pytest.approx(1.0)
     assert first.report.realized_pnl == pytest.approx(0.0)
     assert first.report.simulated is True
+    assert first.report.authenticated_vendor_data is False
+    assert first.report.retrieval_mode == "mocked_http"
     disclaimer = first.report.price_disclaimer.lower()
     assert "mocked" in disclaimer or "not live" in disclaimer
     assert first.result.journal.dumps() == second.result.journal.dumps()

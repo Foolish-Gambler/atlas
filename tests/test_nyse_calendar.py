@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from datetime import UTC, date, datetime, timedelta
 
-from atlas.market_data.nyse import EASTERN, NyseCalendar
+import pytest
+
+from atlas.market_data.nyse import EASTERN, NyseCalendar, UnsupportedCalendarError
 
 
 def test_holiday_weekend_and_early_close() -> None:
@@ -31,3 +33,11 @@ def test_dst_spring_forward_offsets() -> None:
     assert friday.open.astimezone(UTC) == datetime(2024, 3, 8, 14, 30, tzinfo=UTC)
     assert monday.open.astimezone(UTC) == datetime(2024, 3, 11, 13, 30, tzinfo=UTC)
     assert friday.open.tzinfo == EASTERN
+
+
+def test_unsupported_year_is_rejected() -> None:
+    calendar = NyseCalendar()
+    with pytest.raises(UnsupportedCalendarError, match="2026"):
+        calendar.session_on(date(2026, 1, 5))
+    with pytest.raises(UnsupportedCalendarError, match="2023"):
+        calendar.sessions(date(2023, 1, 3), date(2023, 1, 10))
