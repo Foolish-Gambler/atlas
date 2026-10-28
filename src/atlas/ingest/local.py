@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 from collections.abc import Sequence
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -21,8 +20,16 @@ from atlas.contracts import (
     SourceKind,
     StatementRecord,
     StreamEvent,
-    StreamEventType,
-    TimeIndex,
+)
+from atlas.ingest.codec import (
+    build_stream,
+    parse_bar,
+    parse_ensemble,
+    parse_filing,
+    parse_news,
+    parse_prediction,
+    parse_research,
+    parse_statement,
 )
 from atlas.validation import InvalidInputError, normalize_symbol
 
@@ -40,17 +47,25 @@ class LocalFixtureSource(ReadOnlyBarSource, ReadOnlyEventSource):
             dataset_id=str(payload["dataset_id"]),
             revision=str(payload["revision"]),
         )
-        self._bars = tuple(_parse_bars(payload.get("bars", []), self.provenance))
-        self._filings = tuple(_parse_filings(payload.get("filings", []), self.provenance))
-        self._news = tuple(_parse_news(payload.get("news", []), self.provenance))
-        self._statements = tuple(_parse_statements(payload.get("statements", []), self.provenance))
-        self._research = tuple(_parse_research(payload.get("research", []), self.provenance))
-        self._predictions = tuple(
-            _parse_predictions(payload.get("predictions", []), self.provenance)
+        self._bars = tuple(_parse_many(payload.get("bars", []), parse_bar, self.provenance))
+        self._filings = tuple(
+            _parse_many(payload.get("filings", []), parse_filing, self.provenance)
         )
-        self._ensembles = tuple(_parse_ensembles(payload.get("ensembles", []), self.provenance))
+        self._news = tuple(_parse_many(payload.get("news", []), parse_news, self.provenance))
+        self._statements = tuple(
+            _parse_many(payload.get("statements", []), parse_statement, self.provenance)
+        )
+        self._research = tuple(
+            _parse_many(payload.get("research", []), parse_research, self.provenance)
+        )
+        self._predictions = tuple(
+            _parse_many(payload.get("predictions", []), parse_prediction, self.provenance)
+        )
+        self._ensembles = tuple(
+            _parse_many(payload.get("ensembles", []), parse_ensemble, self.provenance)
+        )
         self._by_ref = {bar.ref_id: bar for bar in self._bars}
-        self._events = _build_stream(
+        self._events = build_stream(
             self._bars,
             self._filings,
             self._news,
@@ -95,178 +110,5 @@ class LocalFixtureSource(ReadOnlyBarSource, ReadOnlyEventSource):
             raise InvalidInputError(f"unknown bar ref_id {ref_id!r}") from exc
 
 
-def _parse_dt(value: str) -> datetime:
-    return datetime.fromisoformat(value)
-
-
-def _time(row: dict[str, Any]) -> TimeIndex:
-    return TimeIndex(
-        event_time=_parse_dt(row["event_time"]),
-        available_time=_parse_dt(row["available_time"]),
-        ingested_time=_parse_dt(row["ingested_time"]) if row.get("ingested_time") else None,
-    )
-
-
-def _parse_bars(rows: list[dict[str, Any]], provenance: Provenance) -> list[MarketBarRecord]:
-    return [
-        MarketBarRecord(
-            symbol=row["symbol"],
-            open_time=_parse_dt(row["open_time"]),
-            close_time=_parse_dt(row["close_time"]),
-            available_time=_parse_dt(row["available_time"]),
-            provenance=provenance,
-            open=row["open"],
-            high=row["high"],
-            low=row["low"],
-            close=row["close"],
-            volume=row["volume"],
-        )
-        for row in rows
-    ]
-
-
-def _parse_filings(rows: list[dict[str, Any]], provenance: Provenance) -> list[FilingRecord]:
-    return [
-        FilingRecord(
-            symbol=row["symbol"],
-            form_type=row["form_type"],
-            time=_time(row),
-            provenance=provenance,
-            accession=row["accession"],
-        )
-        for row in rows
-    ]
-
-
-def _parse_news(rows: list[dict[str, Any]], provenance: Provenance) -> list[NewsRecord]:
-    return [
-        NewsRecord(
-            symbol=row["symbol"],
-            time=_time(row),
-            provenance=provenance,
-            headline=row["headline"],
-        )
-        for row in rows
-    ]
-
-
-def _parse_statements(rows: list[dict[str, Any]], provenance: Provenance) -> list[StatementRecord]:
-    return [
-        StatementRecord(
-            symbol=row["symbol"],
-            time=_time(row),
-            provenance=provenance,
-            earnings_per_share=row["earnings_per_share"],
-            book_value_per_share=row["book_value_per_share"],
-        )
-        for row in rows
-    ]
-
-
-def _parse_research(rows: list[dict[str, Any]], provenance: Provenance) -> list[ResearchArtifact]:
-    return [
-        ResearchArtifact(
-            artifact_id=row["artifact_id"],
-            model_id=row["model_id"],
-            model_version=row["model_version"],
-            time=_time(row),
-            provenance=provenance,
-            symbols=tuple(row["symbols"]),
-            thesis=row["thesis"],
-            evidence_refs=tuple(row.get("evidence_refs", ())),
-        )
-        for row in rows
-    ]
-
-
-def _parse_predictions(
-    rows: list[dict[str, Any]], provenance: Provenance
-) -> list[ReturnPrediction]:
-    return [
-        ReturnPrediction(
-            prediction_id=row["prediction_id"],
-            model_id=row["model_id"],
-            model_version=row["model_version"],
-            symbol=row["symbol"],
-            horizon=row["horizon"],
-            expected_return=row["expected_return"],
-            uncertainty=row["uncertainty"],
-            time=_time(row),
-            provenance=provenance,
-        )
-        for row in rows
-    ]
-
-
-def _parse_ensembles(
-    rows: list[dict[str, Any]], provenance: Provenance
-) -> list[EnsemblePrediction]:
-    return [
-        EnsemblePrediction(
-            ensemble_id=row["ensemble_id"],
-            symbol=row["symbol"],
-            horizon=row["horizon"],
-            expected_return=row["expected_return"],
-            uncertainty=row["uncertainty"],
-            members=tuple(row["members"]),
-            time=_time(row),
-            provenance=provenance,
-        )
-        for row in rows
-    ]
-
-
-def _build_stream(
-    bars: Sequence[MarketBarRecord],
-    filings: Sequence[FilingRecord],
-    news: Sequence[NewsRecord],
-    statements: Sequence[StatementRecord],
-    research: Sequence[ResearchArtifact],
-    predictions: Sequence[ReturnPrediction],
-    ensembles: Sequence[EnsemblePrediction],
-) -> tuple[StreamEvent, ...]:
-    events: list[StreamEvent] = []
-    for bar in bars:
-        events.append(
-            StreamEvent(bar.open_event_id, StreamEventType.BAR_OPEN, bar.open_index, bar.ref_id)
-        )
-        events.append(
-            StreamEvent(bar.close_event_id, StreamEventType.BAR_CLOSE, bar.close_index, bar.ref_id)
-        )
-    for filing in filings:
-        event_id = f"filing:{filing.accession}"
-        events.append(StreamEvent(event_id, StreamEventType.FILING, filing.time, event_id))
-    for item in news:
-        event_id = f"news:{item.symbol}:{item.time.event_time.isoformat()}"
-        events.append(StreamEvent(event_id, StreamEventType.NEWS, item.time, event_id))
-    for statement in statements:
-        event_id = f"statement:{statement.symbol}:{statement.time.event_time.isoformat()}"
-        events.append(StreamEvent(event_id, StreamEventType.STATEMENT, statement.time, event_id))
-    for artifact in research:
-        events.append(
-            StreamEvent(
-                f"research:{artifact.artifact_id}",
-                StreamEventType.RESEARCH,
-                artifact.time,
-                artifact.artifact_id,
-            )
-        )
-    for prediction in predictions:
-        events.append(
-            StreamEvent(
-                f"prediction:{prediction.prediction_id}",
-                StreamEventType.PREDICTION,
-                prediction.time,
-                prediction.prediction_id,
-            )
-        )
-    for ensemble in ensembles:
-        events.append(
-            StreamEvent(
-                f"ensemble:{ensemble.ensemble_id}",
-                StreamEventType.PREDICTION,
-                ensemble.time,
-                ensemble.ensemble_id,
-            )
-        )
-    return tuple(events)
+def _parse_many(rows: list[dict[str, Any]], parser: Any, provenance: Provenance) -> list[Any]:
+    return [parser(row, provenance, require_ingested=False) for row in rows]

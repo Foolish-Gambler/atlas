@@ -16,12 +16,12 @@ from atlas.config import AtlasSettings
 from atlas.contracts import (
     EventClock,
     MarketBarRecord,
+    PitReplaySource,
     StreamEvent,
     StreamEventType,
     event_sort_key,
 )
 from atlas.domain import PriceMark, Signal, SignalSide
-from atlas.ingest.local import LocalFixtureSource
 from atlas.paper_trading.broker import PaperBroker, PaperFill
 from atlas.risk.manager import RiskDecision, RiskManager
 from atlas.safety import SafetyError
@@ -68,7 +68,7 @@ class PitBacktestEngine:
 
     def run(
         self,
-        source: LocalFixtureSource,
+        source: PitReplaySource,
         strategy: Strategy | None = None,
         *,
         run_id: str | None = None,

@@ -16,6 +16,9 @@ wheels/
 htmlcov/
 .mypy_cache/
 
+# Local immutable snapshots (never commit operator data)
+data/snapshots/
+
 # Secrets and local env (never commit)
 .env
 .env.*

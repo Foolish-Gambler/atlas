@@ -81,6 +81,8 @@ class TimeIndex:
             )
         if self.available_time < self.event_time:
             raise InvalidInputError("available_time cannot precede event_time (lookahead).")
+        if self.ingested_time is not None and self.ingested_time < self.available_time:
+            raise InvalidInputError("ingested_time cannot precede available_time.")
 
 
 @dataclass(frozen=True, slots=True)
@@ -101,6 +103,7 @@ class MarketBarRecord:
     low: float
     close: float
     volume: int
+    ingested_time: datetime | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "symbol", normalize_symbol(self.symbol))
@@ -115,6 +118,14 @@ class MarketBarRecord:
             raise InvalidInputError("close_time cannot precede open_time.")
         if self.available_time < self.close_time:
             raise InvalidInputError("available_time cannot precede close_time.")
+        if self.ingested_time is not None:
+            object.__setattr__(
+                self,
+                "ingested_time",
+                require_aware_datetime(self.ingested_time, "ingested_time"),
+            )
+            if self.ingested_time < self.available_time:
+                raise InvalidInputError("ingested_time cannot precede available_time.")
         object.__setattr__(self, "open", require_positive_finite(self.open, "open"))
         object.__setattr__(self, "high", require_positive_finite(self.high, "high"))
         object.__setattr__(self, "low", require_positive_finite(self.low, "low"))
@@ -148,7 +159,11 @@ class MarketBarRecord:
 
     @property
     def close_index(self) -> TimeIndex:
-        return TimeIndex(event_time=self.close_time, available_time=self.available_time)
+        return TimeIndex(
+            event_time=self.close_time,
+            available_time=self.available_time,
+            ingested_time=self.ingested_time,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -326,6 +341,28 @@ class ReadOnlyEventSource(Protocol):
     """Point-in-time event stream. Implementations must not place orders or call the network."""
 
     def stream(self) -> Sequence[StreamEvent]: ...
+
+
+class PitReplaySource(Protocol):
+    """Read-only market archive consumed by PitBacktestEngine. No orders, no HTTP."""
+
+    def all_bars(self) -> tuple[MarketBarRecord, ...]: ...
+
+    def stream(self) -> Sequence[StreamEvent]: ...
+
+    def bar_by_ref(self, ref_id: str) -> MarketBarRecord: ...
+
+    def filings(self) -> tuple[FilingRecord, ...]: ...
+
+    def news(self) -> tuple[NewsRecord, ...]: ...
+
+    def statements(self) -> tuple[StatementRecord, ...]: ...
+
+    def research(self) -> tuple[ResearchArtifact, ...]: ...
+
+    def predictions(self) -> tuple[ReturnPrediction, ...]: ...
+
+    def ensembles(self) -> tuple[EnsemblePrediction, ...]: ...
 
 
 _EVENT_RANK = {

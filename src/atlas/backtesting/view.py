@@ -11,12 +11,12 @@ from atlas.contracts import (
     FilingRecord,
     MarketBarRecord,
     NewsRecord,
+    PitReplaySource,
     ResearchArtifact,
     ReturnPrediction,
     StatementRecord,
     StreamEvent,
 )
-from atlas.ingest.local import LocalFixtureSource
 from atlas.validation import normalize_symbol, require_aware_datetime
 
 
@@ -45,7 +45,7 @@ class MarketView:
 
 
 def build_view(
-    source: LocalFixtureSource,
+    source: PitReplaySource,
     visible: Sequence[StreamEvent],
     as_of: datetime,
 ) -> MarketView:

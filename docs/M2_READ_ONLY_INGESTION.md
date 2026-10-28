@@ -145,7 +145,7 @@ A `NetworkGuard` flag defaults to **off**. Production-like fetches require an ex
 
 ## Rollout
 
-1. Snapshot store + manifest (local disk, no HTTP).
+1. Snapshot store + manifest (local disk, no HTTP). **M2-A implemented** (`SnapshotStore`, `docs/SNAPSHOT_SCHEMA.md`).
 2. Alpaca historical bars behind mocks, then approved one-off fetch to a new revision.
 3. EDGAR filings/statements behind mocks, then approved one-off fetch.
 4. Wire snapshots into `LocalFixtureSource` or a thin `SnapshotSource`.

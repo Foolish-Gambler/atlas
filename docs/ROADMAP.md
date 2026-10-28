@@ -52,7 +52,11 @@
 
 ## 마일스톤 2 — 읽기 전용 실데이터 (설계: `docs/M2_READ_ONLY_INGESTION.md`)
 
-사람 승인 후에만 HTTP를 연다. 설계 요지:
+### M2-A — 구현 중: 불변 스냅샷 저장소
+
+`SnapshotStore`, `manifest.json`, SHA-256, 원자적 리비전 생성, `PitReplaySource`. 스키마: `docs/SNAPSHOT_SCHEMA.md`. HTTP 없음.
+
+사람 승인 후에만 HTTP를 연다. 이후 요지:
 
 - SEC EDGAR 공시·제표와 Alpaca **과거 시세**의 GET 전용 어댑터 (`SourceKind.VENDOR_READ_ONLY`).
 - `TimeIndex` + provenance, `dataset_id`/`revision` 스냅샷, 오프라인 픽스처·모킹 HTTP 테스트.

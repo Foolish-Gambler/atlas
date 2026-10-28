@@ -13,6 +13,7 @@ def test_collect_status_lists_all_modules(settings: AtlasSettings) -> None:
         "fundamentals",
         "forecasting",
         "risk",
+        "ingest",
         "backtesting",
         "paper_trading",
     }
