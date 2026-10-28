@@ -13,7 +13,13 @@ from atlas.backtesting.journal import JsonlJournal
 from atlas.backtesting.strategy import NextOpenBuyStrategy, Strategy
 from atlas.backtesting.view import MarketView, build_view
 from atlas.config import AtlasSettings
-from atlas.contracts import EventClock, MarketBarRecord
+from atlas.contracts import (
+    EventClock,
+    MarketBarRecord,
+    StreamEvent,
+    StreamEventType,
+    event_sort_key,
+)
 from atlas.domain import PriceMark, Signal, SignalSide
 from atlas.ingest.local import LocalFixtureSource
 from atlas.paper_trading.broker import PaperBroker, PaperFill
@@ -48,7 +54,7 @@ class _Pending:
 
 
 class PitBacktestEngine:
-    """Replay local fixtures: decide on available close, fill at a later same-symbol open."""
+    """Decide on bar-close publication; fill at a later same-symbol session open."""
 
     def __init__(
         self,
@@ -71,8 +77,7 @@ class PitBacktestEngine:
         strategy = strategy or NextOpenBuyStrategy()
         run_id = run_id or uuid4().hex
         journal = JsonlJournal(journal_path)
-        clock = EventClock(source.stream())
-        bars = _ordered_bars(source.all_bars())
+        bars = source.all_bars()
         if not bars:
             raise ValueError("bars are required.")
         symbols = {bar.symbol for bar in bars}
@@ -81,6 +86,8 @@ class PitBacktestEngine:
                 "M1 pit backtests support a single symbol; "
                 f"got {sorted(symbols)}. Multi-asset scheduling is not implemented."
             )
+        clock = EventClock(source.stream())
+        _assert_monotonic(clock.events)
         risk = RiskManager(limits=self.risk.limits, id_factory=_stable_ids(run_id))
         broker = PaperBroker.from_settings(self.settings, risk=risk)
         pending: _Pending | None = None
@@ -88,26 +95,33 @@ class PitBacktestEngine:
         cancelled = 0
         equity_curve: list[float] = []
 
-        for bar in bars:
-            if pending is not None and _is_eligible_fill(pending, bar):
-                filled = self._execute_pending(broker, pending, bar, run_id, journal)
-                if not filled:
-                    rejected += 1
-                pending = None
-            elif pending is not None and bar.symbol != pending.symbol:
-                raise SafetyError("pending order cannot execute on a different symbol's bar")
+        for event in clock.events:
+            if event.event_type is StreamEventType.BAR_OPEN:
+                bar = source.bar_by_ref(event.ref_id)
+                if pending is not None and _is_eligible_open(pending, bar):
+                    filled = self._execute_pending(broker, pending, bar, run_id, journal)
+                    if not filled:
+                        rejected += 1
+                    pending = None
+                elif pending is not None and bar.symbol != pending.symbol:
+                    raise SafetyError("pending order cannot execute on a different symbol's bar")
+                continue
 
+            if event.event_type is not StreamEventType.BAR_CLOSE:
+                continue
+
+            bar = source.bar_by_ref(event.ref_id)
             self._mark_close(broker, bar)
-            view = build_view(
-                source, clock.visible(bar.time.available_time), bar.time.available_time
-            )
-            self._assert_no_lookahead(view, bar.time.available_time)
+            as_of = bar.available_time
+            view = build_view(source, clock.visible(as_of), as_of)
+            self._assert_no_lookahead(view, as_of)
             journal.append(
                 {
                     "type": "view",
                     "run_id": run_id,
-                    "as_of": bar.time.available_time.isoformat(),
-                    "visible_event_ids": [event.event_id for event in view.events],
+                    "as_of": as_of.isoformat(),
+                    "event_id": event.event_id,
+                    "visible_event_ids": [item.event_id for item in view.events],
                 }
             )
             if pending is not None:
@@ -124,8 +138,8 @@ class PitBacktestEngine:
                 {
                     "type": "decision",
                     "run_id": run_id,
-                    "as_of": bar.time.available_time.isoformat(),
-                    "event_id": f"bar:{bar.symbol}:{bar.time.event_time.isoformat()}",
+                    "as_of": as_of.isoformat(),
+                    "event_id": bar.close_event_id,
                     "decision_id": decision.decision_id,
                     "approved": decision.approved,
                     "symbol": signal.symbol,
@@ -142,8 +156,8 @@ class PitBacktestEngine:
             pending = _Pending(
                 decision=decision,
                 signal=signal,
-                origin_event_id=f"bar:{bar.symbol}:{bar.time.event_time.isoformat()}",
-                decision_time=bar.time.available_time,
+                origin_event_id=bar.close_event_id,
+                decision_time=as_of,
                 symbol=signal.symbol,
             )
             equity_curve.append(broker.marked_equity())
@@ -154,7 +168,7 @@ class PitBacktestEngine:
                 {
                     "type": "cancel",
                     "run_id": run_id,
-                    "reason": "no_later_same_symbol_bar",
+                    "reason": "no_later_same_symbol_open",
                     "decision_id": pending.decision.decision_id,
                     "decision_time": pending.decision_time.isoformat(),
                 }
@@ -183,7 +197,7 @@ class PitBacktestEngine:
     ) -> bool:
         if bar.symbol != pending.symbol:
             raise SafetyError("pending order cannot execute on a different symbol's bar")
-        if bar.time.event_time <= pending.decision_time:
+        if bar.open_time <= pending.decision_time:
             raise SafetyError("execution timestamp must be after the decision timestamp")
         fill_price = slipped_price(bar.open, pending.signal.side, self.execution)
         fee = commission(pending.signal, fill_price, self.execution)
@@ -205,9 +219,9 @@ class PitBacktestEngine:
                     "type": "reject",
                     "run_id": run_id,
                     "origin_event_id": pending.origin_event_id,
-                    "execute_event_id": f"bar:{bar.symbol}:{bar.time.event_time.isoformat()}",
+                    "execute_event_id": bar.open_event_id,
                     "decision_time": pending.decision_time.isoformat(),
-                    "execution_time": bar.time.event_time.isoformat(),
+                    "execution_time": bar.open_time.isoformat(),
                     "open": bar.open,
                     "intended_fill_price": fill_price,
                     "commission": fee,
@@ -234,9 +248,9 @@ class PitBacktestEngine:
                 "type": "fill",
                 "run_id": run_id,
                 "origin_event_id": pending.origin_event_id,
-                "execute_event_id": f"bar:{bar.symbol}:{bar.time.event_time.isoformat()}",
+                "execute_event_id": bar.open_event_id,
                 "decision_time": pending.decision_time.isoformat(),
-                "execution_time": bar.time.event_time.isoformat(),
+                "execution_time": bar.open_time.isoformat(),
                 "fill_id": fill.fill_id,
                 "risk_decision_id": fill.risk_decision_id,
                 "symbol": fill.symbol,
@@ -257,7 +271,7 @@ class PitBacktestEngine:
                 bar.symbol: PriceMark(
                     symbol=bar.symbol,
                     price=bar.close,
-                    as_of=bar.time.event_time,
+                    as_of=bar.available_time,
                     provenance=(
                         "simulated"
                         if bar.provenance.source_kind.value == "simulated"
@@ -271,10 +285,31 @@ class PitBacktestEngine:
         for event in view.events:
             if event.time.available_time > as_of:
                 raise SafetyError("strategy view leaked an event after as_of")
+        for bar in view.bars:
+            if bar.available_time > as_of or bar.close_time > as_of:
+                raise SafetyError("strategy view leaked an incomplete or future bar")
+        for filing in view.filings:
+            if filing.time.available_time > as_of:
+                raise SafetyError("strategy view leaked a future filing")
+        for artifact in view.research:
+            if artifact.time.available_time > as_of:
+                raise SafetyError("strategy view leaked future research")
+        for prediction in view.predictions:
+            if prediction.time.available_time > as_of:
+                raise SafetyError("strategy view leaked a future prediction")
 
 
-def _is_eligible_fill(pending: _Pending, bar: MarketBarRecord) -> bool:
-    return bar.symbol == pending.symbol and bar.time.event_time > pending.decision_time
+def _is_eligible_open(pending: _Pending, bar: MarketBarRecord) -> bool:
+    return bar.symbol == pending.symbol and bar.open_time > pending.decision_time
+
+
+def _assert_monotonic(events: tuple[StreamEvent, ...]) -> None:
+    previous = None
+    for event in events:
+        key = event_sort_key(event)
+        if previous is not None and key < previous:
+            raise SafetyError("event stream is not monotonically ordered")
+        previous = key
 
 
 def _stable_ids(run_id: str) -> Callable[[], str]:
@@ -286,10 +321,3 @@ def _stable_ids(run_id: str) -> Callable[[], str]:
         return f"{run_id}-{counter:06d}"
 
     return next_id
-
-
-def _ordered_bars(bars: tuple[MarketBarRecord, ...]) -> list[MarketBarRecord]:
-    return sorted(
-        bars,
-        key=lambda bar: (bar.time.available_time, bar.time.event_time, bar.symbol),
-    )

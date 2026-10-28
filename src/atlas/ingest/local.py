@@ -49,6 +49,7 @@ class LocalFixtureSource(ReadOnlyBarSource, ReadOnlyEventSource):
             _parse_predictions(payload.get("predictions", []), self.provenance)
         )
         self._ensembles = tuple(_parse_ensembles(payload.get("ensembles", []), self.provenance))
+        self._by_ref = {bar.ref_id: bar for bar in self._bars}
         self._events = _build_stream(
             self._bars,
             self._filings,
@@ -87,6 +88,12 @@ class LocalFixtureSource(ReadOnlyBarSource, ReadOnlyEventSource):
     def stream(self) -> Sequence[StreamEvent]:
         return self._events
 
+    def bar_by_ref(self, ref_id: str) -> MarketBarRecord:
+        try:
+            return self._by_ref[ref_id]
+        except KeyError as exc:
+            raise InvalidInputError(f"unknown bar ref_id {ref_id!r}") from exc
+
 
 def _parse_dt(value: str) -> datetime:
     return datetime.fromisoformat(value)
@@ -104,7 +111,9 @@ def _parse_bars(rows: list[dict[str, Any]], provenance: Provenance) -> list[Mark
     return [
         MarketBarRecord(
             symbol=row["symbol"],
-            time=_time(row),
+            open_time=_parse_dt(row["open_time"]),
+            close_time=_parse_dt(row["close_time"]),
+            available_time=_parse_dt(row["available_time"]),
             provenance=provenance,
             open=row["open"],
             high=row["high"],
@@ -218,9 +227,11 @@ def _build_stream(
 ) -> tuple[StreamEvent, ...]:
     events: list[StreamEvent] = []
     for bar in bars:
-        event_id = f"bar:{bar.symbol}:{bar.time.event_time.isoformat()}"
         events.append(
-            StreamEvent(event_id, StreamEventType.BAR, bar.time, event_id),
+            StreamEvent(bar.open_event_id, StreamEventType.BAR_OPEN, bar.open_index, bar.ref_id)
+        )
+        events.append(
+            StreamEvent(bar.close_event_id, StreamEventType.BAR_CLOSE, bar.close_index, bar.ref_id)
         )
     for filing in filings:
         event_id = f"filing:{filing.accession}"

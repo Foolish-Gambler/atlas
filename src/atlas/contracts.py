@@ -31,7 +31,8 @@ class SourceKind(StrEnum):
 
 
 class StreamEventType(StrEnum):
-    BAR = "bar"
+    BAR_OPEN = "bar_open"
+    BAR_CLOSE = "bar_close"
     QUOTE = "quote"
     NEWS = "news"
     FILING = "filing"
@@ -84,8 +85,16 @@ class TimeIndex:
 
 @dataclass(frozen=True, slots=True)
 class MarketBarRecord:
+    """Daily (or session) bar with distinct open, close, and publication times.
+
+    Complete OHLCV is usable only at `available_time` (>= `close_time`).
+    Simulated fills use `open_time` and `open`, never `close_time`.
+    """
+
     symbol: str
-    time: TimeIndex
+    open_time: datetime
+    close_time: datetime
+    available_time: datetime
     provenance: Provenance
     open: float
     high: float
@@ -95,6 +104,17 @@ class MarketBarRecord:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "symbol", normalize_symbol(self.symbol))
+        object.__setattr__(self, "open_time", require_aware_datetime(self.open_time, "open_time"))
+        object.__setattr__(
+            self, "close_time", require_aware_datetime(self.close_time, "close_time")
+        )
+        object.__setattr__(
+            self, "available_time", require_aware_datetime(self.available_time, "available_time")
+        )
+        if self.close_time < self.open_time:
+            raise InvalidInputError("close_time cannot precede open_time.")
+        if self.available_time < self.close_time:
+            raise InvalidInputError("available_time cannot precede close_time.")
         object.__setattr__(self, "open", require_positive_finite(self.open, "open"))
         object.__setattr__(self, "high", require_positive_finite(self.high, "high"))
         object.__setattr__(self, "low", require_positive_finite(self.low, "low"))
@@ -109,6 +129,26 @@ class MarketBarRecord:
             raise InvalidInputError("high must be at least open and close.")
         if self.low > self.open or self.low > self.close:
             raise InvalidInputError("low must be at most open and close.")
+
+    @property
+    def ref_id(self) -> str:
+        return f"bar:{self.symbol}:{self.close_time.isoformat()}"
+
+    @property
+    def open_event_id(self) -> str:
+        return f"bar-open:{self.symbol}:{self.open_time.isoformat()}"
+
+    @property
+    def close_event_id(self) -> str:
+        return f"bar-close:{self.symbol}:{self.close_time.isoformat()}"
+
+    @property
+    def open_index(self) -> TimeIndex:
+        return TimeIndex(event_time=self.open_time, available_time=self.open_time)
+
+    @property
+    def close_index(self) -> TimeIndex:
+        return TimeIndex(event_time=self.close_time, available_time=self.available_time)
 
 
 @dataclass(frozen=True, slots=True)
@@ -288,11 +328,37 @@ class ReadOnlyEventSource(Protocol):
     def stream(self) -> Sequence[StreamEvent]: ...
 
 
-def sort_stream(events: Iterable[StreamEvent]) -> list[StreamEvent]:
-    return sorted(
-        events,
-        key=lambda event: (event.time.available_time, event.time.event_time, event.event_id),
+_EVENT_RANK = {
+    StreamEventType.BAR_OPEN: 0,
+    StreamEventType.QUOTE: 1,
+    StreamEventType.NEWS: 2,
+    StreamEventType.FILING: 3,
+    StreamEventType.STATEMENT: 4,
+    StreamEventType.MACRO: 5,
+    StreamEventType.RESEARCH: 6,
+    StreamEventType.PREDICTION: 7,
+    StreamEventType.BAR_CLOSE: 8,
+}
+
+
+def event_sort_key(event: StreamEvent) -> tuple[datetime, datetime, int, str]:
+    return (
+        event.time.available_time,
+        event.time.event_time,
+        _EVENT_RANK.get(event.event_type, 9),
+        event.event_id,
     )
+
+
+def sort_stream(events: Iterable[StreamEvent]) -> list[StreamEvent]:
+    ordered = sorted(events, key=event_sort_key)
+    previous: tuple[datetime, datetime, int, str] | None = None
+    for event in ordered:
+        key = event_sort_key(event)
+        if previous is not None and key < previous:
+            raise InvalidInputError("event stream is not monotonically ordered.")
+        previous = key
+    return ordered
 
 
 class EventClock:

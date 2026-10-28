@@ -1,0 +1,29 @@
+{
+  "dataset_id": "m1-weekend",
+  "revision": "1",
+  "source_kind": "simulated",
+  "bars": [
+    {
+      "symbol": "SIM-A",
+      "open_time": "2024-01-05T14:30:00+00:00",
+      "close_time": "2024-01-05T21:00:00+00:00",
+      "available_time": "2024-01-05T21:00:00+00:00",
+      "open": 100.0,
+      "high": 101.0,
+      "low": 99.0,
+      "close": 100.0,
+      "volume": 1000
+    },
+    {
+      "symbol": "SIM-A",
+      "open_time": "2024-01-08T14:30:00+00:00",
+      "close_time": "2024-01-08T21:00:00+00:00",
+      "available_time": "2024-01-08T21:00:00+00:00",
+      "open": 104.0,
+      "high": 105.0,
+      "low": 103.0,
+      "close": 104.5,
+      "volume": 1100
+    }
+  ]
+}

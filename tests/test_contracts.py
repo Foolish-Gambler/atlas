@@ -44,7 +44,7 @@ def test_time_index_rejects_naive_datetimes() -> None:
 def test_event_clock_hides_future_available_times() -> None:
     early = StreamEvent(
         event_id="e1",
-        event_type=StreamEventType.BAR,
+        event_type=StreamEventType.BAR_CLOSE,
         time=TimeIndex(event_time=_t(1, 16), available_time=_t(1, 16)),
         ref_id="bar-1",
     )
@@ -61,16 +61,46 @@ def test_event_clock_hides_future_available_times() -> None:
 
 
 def test_market_bar_record_validates_ohlc() -> None:
-    time = TimeIndex(event_time=_t(2, 16), available_time=_t(2, 16))
     with pytest.raises(InvalidInputError):
         MarketBarRecord(
             symbol="sim-a",
-            time=time,
+            open_time=_t(2, 14),
+            close_time=_t(2, 21),
+            available_time=_t(2, 21),
             provenance=_prov(),
             open=10.0,
             high=9.0,
             low=8.0,
             close=9.5,
+            volume=1,
+        )
+
+
+def test_market_bar_requires_open_close_available_order() -> None:
+    with pytest.raises(InvalidInputError, match="close_time"):
+        MarketBarRecord(
+            symbol="sim-a",
+            open_time=_t(2, 21),
+            close_time=_t(2, 14),
+            available_time=_t(2, 21),
+            provenance=_prov(),
+            open=10.0,
+            high=11.0,
+            low=9.0,
+            close=10.5,
+            volume=1,
+        )
+    with pytest.raises(InvalidInputError, match="available_time"):
+        MarketBarRecord(
+            symbol="sim-a",
+            open_time=_t(2, 14),
+            close_time=_t(2, 21),
+            available_time=_t(2, 16),
+            provenance=_prov(),
+            open=10.0,
+            high=11.0,
+            low=9.0,
+            close=10.5,
             volume=1,
         )
 

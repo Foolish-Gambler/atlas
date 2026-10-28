@@ -51,16 +51,25 @@ def build_view(
 ) -> MarketView:
     as_of = require_aware_datetime(as_of, "as_of")
     visible_ids = {event.event_id for event in visible}
+    events = tuple(event for event in visible if event.time.available_time <= as_of)
+    bars = tuple(
+        sorted(
+            (
+                bar
+                for bar in source.all_bars()
+                if bar.close_event_id in visible_ids and bar.available_time <= as_of
+            ),
+            key=lambda bar: (bar.close_time, bar.symbol),
+        )
+    )
     return MarketView(
         as_of=as_of,
-        events=tuple(visible),
-        bars=tuple(
-            bar
-            for bar in source.all_bars()
-            if f"bar:{bar.symbol}:{bar.time.event_time.isoformat()}" in visible_ids
-        ),
+        events=events,
+        bars=bars,
         filings=tuple(
-            filing for filing in source.filings() if f"filing:{filing.accession}" in visible_ids
+            filing
+            for filing in source.filings()
+            if f"filing:{filing.accession}" in visible_ids and filing.time.available_time <= as_of
         ),
         news=tuple(
             item
@@ -77,11 +86,13 @@ def build_view(
             artifact
             for artifact in source.research()
             if f"research:{artifact.artifact_id}" in visible_ids
+            and artifact.time.available_time <= as_of
         ),
         predictions=tuple(
             prediction
             for prediction in source.predictions()
             if f"prediction:{prediction.prediction_id}" in visible_ids
+            and prediction.time.available_time <= as_of
         ),
         ensembles=tuple(
             ensemble

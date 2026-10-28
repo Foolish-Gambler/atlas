@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -18,9 +18,12 @@ from atlas.domain import Signal, TradingMode
 from atlas.ingest import LocalFixtureSource
 from atlas.risk import RiskManager
 
-FIXTURE = Path(__file__).parent / "fixtures" / "pit" / "m1_sim_a.json"
-DELAYED = Path(__file__).parent / "fixtures" / "pit" / "m1_delayed.json"
-MIXED = Path(__file__).parent / "fixtures" / "pit" / "m1_mixed_symbols.json"
+FIXTURE_DIR = Path(__file__).parent / "fixtures" / "pit"
+FIXTURE = FIXTURE_DIR / "m1_sim_a.json"
+DELAYED = FIXTURE_DIR / "m1_delayed.json"
+MIXED = FIXTURE_DIR / "m1_mixed_symbols.json"
+WEEKEND = FIXTURE_DIR / "m1_weekend.json"
+DST = FIXTURE_DIR / "m1_dst.json"
 
 
 class SpyStrategy:
@@ -43,7 +46,10 @@ def test_pit_fills_next_open_not_same_close(settings: AtlasSettings) -> None:
     assert fills[0]["reference_price"] == 100.0
     assert fills[0]["open"] == 102.0
     assert fills[0]["fill_price"] == 102.0
-    assert fills[0]["origin_event_id"] != fills[0]["execute_event_id"]
+    assert fills[0]["origin_event_id"].startswith("bar-close:")
+    assert fills[0]["execute_event_id"].startswith("bar-open:")
+    assert fills[0]["execution_time"] == "2024-01-03T14:30:00+00:00"
+    assert fills[0]["decision_time"] == "2024-01-02T21:00:00+00:00"
     assert fills[0]["execution_time"] > fills[0]["decision_time"]
     assert result.cancelled == 1
 
@@ -54,10 +60,17 @@ def test_strategy_cannot_see_future_filings_or_research(settings: AtlasSettings)
     PitBacktestEngine(settings=settings).run(source, spy, run_id="run-spy")
     first = spy.views[0]
     assert first.as_of == datetime(2024, 1, 2, 21, tzinfo=UTC)
+    assert first.last_bar() is not None
+    assert first.last_bar().high == 101.0
+    assert first.last_bar().low == 99.0
+    assert first.last_bar().close == 100.0
+    assert all(bar.available_time <= first.as_of for bar in first.bars)
+    assert all(bar.close_time <= first.as_of for bar in first.bars)
     assert first.filings == ()
     assert first.research == ()
     assert first.predictions == ()
     assert spy.views[2].research == ()
+    assert spy.views[2].last_bar().high == 102.0
     last = spy.views[-1]
     assert last.as_of == datetime(2024, 1, 5, 21, tzinfo=UTC)
     assert last.filings == ()
@@ -115,7 +128,9 @@ def test_delayed_bar_does_not_fill_at_earlier_open(settings: AtlasSettings) -> N
     assert fills[0]["open"] == 105.0
     assert fills[0]["fill_price"] == 105.0
     assert fills[0]["execution_time"] > fills[0]["decision_time"]
+    assert fills[0]["execute_event_id"].startswith("bar-open:")
     assert "2024-01-03T14:30:00" not in fills[0]["execute_event_id"]
+    assert fills[0]["execution_time"] == "2024-01-04T14:30:00+00:00"
 
 
 def test_insufficient_commission_rolls_back(settings: AtlasSettings) -> None:
@@ -132,6 +147,39 @@ def test_insufficient_commission_rolls_back(settings: AtlasSettings) -> None:
     assert result.fills == 0
     assert result.ending_cash == 100.0
     assert any(row["type"] == "reject" for row in result.journal.records)
+
+
+def test_weekend_gap_fills_monday_open(settings: AtlasSettings) -> None:
+    source = LocalFixtureSource(WEEKEND)
+    result = PitBacktestEngine(settings=settings).run(
+        source, NextOpenBuyStrategy(quantity=1), run_id="weekend"
+    )
+    fills = [row for row in result.journal.records if row["type"] == "fill"]
+    assert len(fills) == 1
+    assert fills[0]["fill_price"] == 104.0
+    assert fills[0]["decision_time"] == "2024-01-05T21:00:00+00:00"
+    assert fills[0]["execution_time"] == "2024-01-08T14:30:00+00:00"
+
+
+def test_dst_transition_uses_eastern_open(settings: AtlasSettings) -> None:
+    # 2024-03-10 US spring-forward: Friday is EST (-5), Monday is EDT (-4).
+    est = timezone(timedelta(hours=-5))
+    edt = timezone(timedelta(hours=-4))
+    friday_open = datetime(2024, 3, 8, 9, 30, tzinfo=est)
+    monday_open = datetime(2024, 3, 11, 9, 30, tzinfo=edt)
+    assert friday_open.utcoffset() == timedelta(hours=-5)
+    assert monday_open.utcoffset() == timedelta(hours=-4)
+    source = LocalFixtureSource(DST)
+    bars = source.all_bars()
+    assert bars[0].open_time == friday_open
+    assert bars[1].open_time == monday_open
+    result = PitBacktestEngine(settings=settings).run(
+        source, NextOpenBuyStrategy(quantity=1), run_id="dst"
+    )
+    fills = [row for row in result.journal.records if row["type"] == "fill"]
+    assert len(fills) == 1
+    assert fills[0]["fill_price"] == 108.0
+    assert datetime.fromisoformat(fills[0]["execution_time"]) == monday_open
 
 
 def test_local_fixture_rejects_vendor_claim(tmp_path: Path) -> None:

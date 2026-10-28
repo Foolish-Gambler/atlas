@@ -1,11 +1,12 @@
 {
   "dataset_id": "m1-mixed",
-  "revision": "1",
+  "revision": "2",
   "source_kind": "simulated",
   "bars": [
     {
       "symbol": "SIM-A",
-      "event_time": "2024-01-02T21:00:00+00:00",
+      "open_time": "2024-01-02T14:30:00+00:00",
+      "close_time": "2024-01-02T21:00:00+00:00",
       "available_time": "2024-01-02T21:00:00+00:00",
       "open": 100.0,
       "high": 101.0,
@@ -15,8 +16,9 @@
     },
     {
       "symbol": "SIM-B",
-      "event_time": "2024-01-03T14:30:00+00:00",
-      "available_time": "2024-01-03T14:30:00+00:00",
+      "open_time": "2024-01-03T14:30:00+00:00",
+      "close_time": "2024-01-03T21:00:00+00:00",
+      "available_time": "2024-01-03T21:00:00+00:00",
       "open": 50.0,
       "high": 51.0,
       "low": 49.0,
