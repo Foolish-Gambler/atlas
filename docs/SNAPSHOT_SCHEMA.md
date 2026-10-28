@@ -36,6 +36,7 @@ Immutable financial datasets live on local disk. HTTP, credentials, and live bro
 | `files` | Relative path → SHA-256 hex digest of exact file bytes |
 | `symbols` | Sorted symbols present in bar files |
 | `counts` | Record counts by kind |
+| `metadata` | Optional vendor query (feed, adjustment, timeframe, `execution_eligible`) |
 
 `manifest.json` itself is not hashed. Payload files are hashed. Load and `atlas snapshot verify` recompute SHA-256 and reject extras, missing files, or mismatches.
 
@@ -63,3 +64,10 @@ atlas snapshot replay --root DIR --dataset ID --revision REV
 ```
 
 Replay uses `PitBacktestEngine` and `PaperBroker` only. It does not fetch data or place live orders.
+
+Vendor snapshots from **1Day** Alpaca aggregates set `metadata.execution_eligible` to false: the vendor timestamp is not an RTH open. Use **1Min** RTH aggregation for paper fills.
+
+```text
+atlas alpaca ingest-recorded --root DIR --dataset ID --revision REV --recorded PATH
+atlas paper demo --root DIR --dataset ID --revision REV
+```

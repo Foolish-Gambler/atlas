@@ -4,7 +4,10 @@ version = "0.1.0"
 description = "Autonomous AI stock investment research and paper-trading platform."
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "httpx>=0.28.1",
+    "tzdata>=2026.6",
+]
 
 [project.scripts]
 atlas = "atlas.cli:main"

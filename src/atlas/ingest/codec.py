@@ -58,6 +58,8 @@ def bar_to_row(bar: MarketBarRecord) -> dict[str, Any]:
         "low": bar.low,
         "close": bar.close,
         "volume": bar.volume,
+        "session_open_verified": bar.session_open_verified,
+        "vendor_time": bar.vendor_time.isoformat() if bar.vendor_time is not None else None,
     }
 
 
@@ -79,6 +81,10 @@ def parse_bar(
         close=row["close"],
         volume=row["volume"],
         ingested_time=parse_datetime(ingested_raw, "ingested_time") if ingested_raw else None,
+        vendor_time=(
+            parse_datetime(row["vendor_time"], "vendor_time") if row.get("vendor_time") else None
+        ),
+        session_open_verified=bool(row.get("session_open_verified", False)),
     )
 
 

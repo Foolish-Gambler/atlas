@@ -125,7 +125,16 @@ No redirects to unexpected hosts
 Response body stored in the snapshot; Authorization headers stripped from logs and cache metadata
 ```
 
-A `NetworkGuard` flag defaults to **off**. Production-like fetches require an explicit operator switch **and** human approval in the session. CI never sets the flag.
+A `NetworkGuard` flag defaults to **off** (`ATLAS_ALLOW_NETWORK` unset). Production-like fetches require that flag **and** human approval in the session. CI never sets the flag. Tests use `httpx.MockTransport` only.
+
+### Approved one-off historical GET (not run in this milestone)
+
+1. Operator sets `APCA_API_KEY_ID` / `APCA_API_SECRET_KEY` in a gitignored `.env`.
+2. Human approves a single read-only session.
+3. Set `ATLAS_ALLOW_NETWORK=1`.
+4. Run a one-off ingest into a **new** `SnapshotStore` revision (never overwrite).
+5. Unset `ATLAS_ALLOW_NETWORK`.
+6. `atlas snapshot verify` then `atlas paper demo` against that revision.
 
 ## Security
 
@@ -146,7 +155,7 @@ A `NetworkGuard` flag defaults to **off**. Production-like fetches require an ex
 ## Rollout
 
 1. Snapshot store + manifest (local disk, no HTTP). **M2-A implemented** (`SnapshotStore`, `docs/SNAPSHOT_SCHEMA.md`).
-2. Alpaca historical bars behind mocks, then approved one-off fetch to a new revision.
+2. Alpaca historical bars behind mocks (**M2-B implemented**). Approved one-off live GET still requires `ATLAS_ALLOW_NETWORK`.
 3. EDGAR filings/statements behind mocks, then approved one-off fetch.
 4. Wire snapshots into `LocalFixtureSource` or a thin `SnapshotSource`.
 5. Stop. LLM agents and ML training wait for M3/M4.

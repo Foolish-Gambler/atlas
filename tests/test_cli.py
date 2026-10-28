@@ -5,6 +5,8 @@ from pathlib import Path
 
 from atlas.cli import main
 
+ALPACA_MIN = Path(__file__).parent / "fixtures" / "ingest" / "alpaca" / "aapl_1min_pages.json"
+
 FIXTURE = Path(__file__).parent / "fixtures" / "pit" / "m1_sim_a.json"
 
 
@@ -102,3 +104,57 @@ def test_snapshot_cli_create_inspect_verify_replay(tmp_path: Path, capsys) -> No
     assert replayed["simulated"] is True
     assert replayed["fills"] == 3
     assert replayed["run_id"] == "cli-replay"
+
+
+def test_alpaca_recorded_ingest_and_paper_demo(tmp_path: Path, capsys, monkeypatch) -> None:
+    monkeypatch.setenv("APCA_API_KEY_ID", "test-key-id")
+    monkeypatch.setenv("APCA_API_SECRET_KEY", "test-secret")
+    root = tmp_path / "snapshots"
+    assert (
+        main(
+            [
+                "alpaca",
+                "ingest-recorded",
+                "--root",
+                str(root),
+                "--dataset",
+                "alpaca-aapl",
+                "--revision",
+                "cli-mock",
+                "--recorded",
+                str(ALPACA_MIN),
+                "--start",
+                "2024-01-02",
+                "--end",
+                "2024-01-03",
+                "--timeframe",
+                "1Min",
+            ]
+        )
+        == 0
+    )
+    created = json.loads(capsys.readouterr().out)
+    assert created["mocked_http"] is True
+    assert created["execution_eligible"] is True
+    assert "test-secret" not in json.dumps(created)
+    assert (
+        main(
+            [
+                "paper",
+                "demo",
+                "--root",
+                str(root),
+                "--dataset",
+                "alpaca-aapl",
+                "--revision",
+                "cli-mock",
+                "--run-id",
+                "cli-10k",
+            ]
+        )
+        == 0
+    )
+    demo = json.loads(capsys.readouterr().out)
+    assert demo["starting_cash"] == 10000.0
+    assert demo["fills"] == 1
+    assert demo["simulated"] is True

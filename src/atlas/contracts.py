@@ -104,6 +104,8 @@ class MarketBarRecord:
     close: float
     volume: int
     ingested_time: datetime | None = None
+    vendor_time: datetime | None = None
+    session_open_verified: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "symbol", normalize_symbol(self.symbol))
@@ -126,6 +128,10 @@ class MarketBarRecord:
             )
             if self.ingested_time < self.available_time:
                 raise InvalidInputError("ingested_time cannot precede available_time.")
+        if self.vendor_time is not None:
+            object.__setattr__(
+                self, "vendor_time", require_aware_datetime(self.vendor_time, "vendor_time")
+            )
         object.__setattr__(self, "open", require_positive_finite(self.open, "open"))
         object.__setattr__(self, "high", require_positive_finite(self.high, "high"))
         object.__setattr__(self, "low", require_positive_finite(self.low, "low"))

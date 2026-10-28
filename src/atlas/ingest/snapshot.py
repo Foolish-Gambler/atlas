@@ -7,7 +7,7 @@ import json
 import re
 import shutil
 from collections.abc import Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -92,9 +92,10 @@ class SnapshotManifest:
     symbols: tuple[str, ...]
     counts: dict[str, int]
     vendor: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload = {
             "schema_version": self.schema_version,
             "dataset_id": self.dataset_id,
             "revision": self.revision,
@@ -106,6 +107,15 @@ class SnapshotManifest:
             "symbols": list(self.symbols),
             "counts": dict(sorted(self.counts.items())),
         }
+        if self.metadata:
+            payload["metadata"] = self.metadata
+        return payload
+
+    @property
+    def execution_eligible(self) -> bool:
+        if "execution_eligible" in self.metadata:
+            return bool(self.metadata["execution_eligible"])
+        return self.source_kind is not SourceKind.VENDOR_READ_ONLY
 
 
 class SnapshotSource:
@@ -192,6 +202,7 @@ class SnapshotStore:
         source_kind: SourceKind,
         vendor: str | None = None,
         created_at: datetime | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> SnapshotManifest:
         dataset_id = _require_id(dataset_id, "dataset_id")
         revision = _require_id(revision, "revision")
@@ -222,6 +233,7 @@ class SnapshotStore:
                 symbols=symbols,
                 counts=counts,
                 vendor=vendor,
+                metadata=dict(metadata or {}),
             )
             (tmp / MANIFEST_NAME).write_bytes(dumps_canonical(manifest.to_dict()))
             tmp.replace(dest)
@@ -439,6 +451,7 @@ def _read_manifest(path: Path) -> SnapshotManifest:
         symbols=tuple(payload.get("symbols", ())),
         counts={str(key): int(value) for key, value in payload.get("counts", {}).items()},
         vendor=payload.get("vendor"),
+        metadata=dict(payload.get("metadata") or {}),
     )
 
 

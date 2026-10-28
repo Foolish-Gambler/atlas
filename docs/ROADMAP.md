@@ -52,9 +52,13 @@
 
 ## 마일스톤 2 — 읽기 전용 실데이터 (설계: `docs/M2_READ_ONLY_INGESTION.md`)
 
-### M2-A — 구현 중: 불변 스냅샷 저장소
+### M2-A — 완료: 불변 스냅샷 저장소
 
-`SnapshotStore`, `manifest.json`, SHA-256, 원자적 리비전 생성, `PitReplaySource`. 스키마: `docs/SNAPSHOT_SCHEMA.md`. HTTP 없음.
+`SnapshotStore`, `manifest.json`, SHA-256, 원자적 리비전 생성, `PitReplaySource`. 스키마: `docs/SNAPSHOT_SCHEMA.md`.
+
+### M2-B — 구현 중: Alpaca 과거 시세 (모킹 HTTP)
+
+`AlpacaBarsAdapter`, NYSE RTH 캘린더, `$10,000` 페이퍼 데모. 실제 `data.alpaca.markets` 호출은 `ATLAS_ALLOW_NETWORK`와 사람 승인이 필요하다.
 
 사람 승인 후에만 HTTP를 연다. 이후 요지:
 

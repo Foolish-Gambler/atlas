@@ -42,6 +42,7 @@ class PitBacktestResult:
     cancelled: int
     equity_curve: tuple[float, ...]
     journal: JsonlJournal
+    ending_positions: dict[str, int]
 
 
 @dataclass(frozen=True, slots=True)
@@ -186,6 +187,7 @@ class PitBacktestEngine:
             cancelled=cancelled,
             equity_curve=tuple(equity_curve),
             journal=journal,
+            ending_positions=dict(broker.positions),
         )
 
     def _execute_pending(
