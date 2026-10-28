@@ -106,9 +106,12 @@ class MarketBarRecord:
     ingested_time: datetime | None = None
     vendor_time: datetime | None = None
     session_open_verified: bool = False
+    session_close_verified: bool = False
     requires_open_interval_evidence: bool = False
     expected_open_time: datetime | None = None
+    expected_close_time: datetime | None = None
     observed_open_time: datetime | None = None
+    observed_last_time: datetime | None = None
     quality_flags: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
@@ -142,11 +145,23 @@ class MarketBarRecord:
                 "expected_open_time",
                 require_aware_datetime(self.expected_open_time, "expected_open_time"),
             )
+        if self.expected_close_time is not None:
+            object.__setattr__(
+                self,
+                "expected_close_time",
+                require_aware_datetime(self.expected_close_time, "expected_close_time"),
+            )
         if self.observed_open_time is not None:
             object.__setattr__(
                 self,
                 "observed_open_time",
                 require_aware_datetime(self.observed_open_time, "observed_open_time"),
+            )
+        if self.observed_last_time is not None:
+            object.__setattr__(
+                self,
+                "observed_last_time",
+                require_aware_datetime(self.observed_last_time, "observed_last_time"),
             )
         object.__setattr__(self, "quality_flags", tuple(self.quality_flags))
         object.__setattr__(self, "open", require_positive_finite(self.open, "open"))

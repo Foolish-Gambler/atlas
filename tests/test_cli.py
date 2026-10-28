@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from atlas.cli import main
 
 ALPACA_MIN = Path(__file__).parent / "fixtures" / "ingest" / "alpaca" / "aapl_1min_pages.json"
@@ -180,3 +182,38 @@ def test_alpaca_recorded_ingest_and_paper_demo(tmp_path: Path, capsys, monkeypat
         )
         == 2
     )
+
+
+def test_fetch_once_uses_readonly_http_without_opening_a_socket(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("APCA_API_KEY_ID", "test-key-id")
+    monkeypatch.setenv("APCA_API_SECRET_KEY", "test-secret")
+    monkeypatch.setenv("ATLAS_ALLOW_NETWORK", "1")
+
+    def forbid_request(self, method, url, *args, **kwargs):  # noqa: ANN001
+        assert method == "GET"
+        raise AssertionError(f"real HTTP is forbidden in tests: {method} {url}")
+
+    monkeypatch.setattr("httpx.Client.request", forbid_request)
+    root = tmp_path / "snapshots"
+    with pytest.raises(AssertionError, match="real HTTP is forbidden"):
+        main(
+            [
+                "alpaca",
+                "fetch-once",
+                "--root",
+                str(root),
+                "--dataset",
+                "live-blocked",
+                "--revision",
+                "once",
+                "--start",
+                "2024-01-02",
+                "--end",
+                "2024-01-02",
+                "--max-query-days",
+                "1",
+            ]
+        )
+    assert not (root / "live-blocked" / "once").exists()

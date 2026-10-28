@@ -113,6 +113,8 @@ class PitBacktestEngine:
                 continue
 
             bar = source.bar_by_ref(event.ref_id)
+            # Valuation uses bar.close_time. Incomplete Alpaca sessions set that to the
+            # last observed minute end, not the official 16:00 close.
             self._mark_close(broker, bar, last_close_time)
             as_of = bar.available_time
             view = build_view(source, clock.visible(as_of), as_of)

@@ -1,4 +1,9 @@
-"""NYSE RTH calendar for 2024–2025. Stdlib only; not a live exchange feed."""
+"""NYSE RTH calendar for 2024–2025. Stdlib only; not a live exchange feed.
+
+Holiday and early-close dates follow NYSE Group notices:
+https://ir.theice.com/press/news-details/2023/NYSE-Group-Announces-2024-2025-and-2026-Holiday-and-Early-Closings-Calendar/default.aspx
+https://ir.theice.com/press/news-details/2024/The-New-York-Stock-Exchange-Will-Close-Markets-on-January-9-to-Honor-the-Passing-of-Former-President-Jimmy-Carter-on-National-Day-of-Mourning/default.aspx
+"""
 
 from __future__ import annotations
 
@@ -14,6 +19,8 @@ class UnsupportedCalendarError(ValueError):
     """Holiday/early-close tables are maintained only for listed years."""
 
 
+# Full-day closures. January 9, 2025 is a National Day of Mourning (Jimmy Carter),
+# not a recurring holiday; omit it and that Thursday is incorrectly tradable.
 _HOLIDAYS = frozenset(
     {
         date(2024, 1, 1),
@@ -27,6 +34,7 @@ _HOLIDAYS = frozenset(
         date(2024, 11, 28),
         date(2024, 12, 25),
         date(2025, 1, 1),
+        date(2025, 1, 9),
         date(2025, 1, 20),
         date(2025, 2, 17),
         date(2025, 4, 18),

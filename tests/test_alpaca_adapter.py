@@ -18,6 +18,7 @@ from atlas.ingest.http import NetworkDisabledError, ReadOnlyHttp, ReadOnlyHttpEr
 from atlas.ingest.snapshot import RevisionExistsError, SnapshotStore
 from atlas.market_data.nyse import EASTERN
 from atlas.paper_trading.demo import ExecutionUnsuitableError, run_virtual_portfolio
+from atlas.validation import InvalidInputError
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures" / "ingest" / "alpaca"
 MIN_PAGES = json.loads((FIXTURE_DIR / "aapl_1min_pages.json").read_text(encoding="utf-8"))["pages"]
@@ -154,7 +155,12 @@ def test_dst_and_early_close_minute_aggregation(alpaca_env: None, tmp_path: Path
         }
     ]
     adapter = adapter_for_tests(_handler(pages))
-    query = AlpacaBarQuery(start=date(2024, 3, 8), end=date(2024, 11, 29), timeframe="1Min")
+    query = AlpacaBarQuery(
+        start=date(2024, 3, 8),
+        end=date(2024, 11, 29),
+        timeframe="1Min",
+        max_query_days=400,
+    )
     result = adapter.ingest(SnapshotStore(tmp_path), dataset_id="cal", revision="1", query=query)
     by_close = {bar.close_time.astimezone(EASTERN).date(): bar for bar in result.bars}
     friday = by_close[date(2024, 3, 8)]
@@ -310,6 +316,227 @@ def test_unsupported_calendar_year_is_rejected() -> None:
 
     with pytest.raises(UnsupportedCalendarError, match="2024"):
         AlpacaBarQuery(start=date(2023, 1, 3), end=date(2023, 1, 4), timeframe="1Min")
+
+
+def test_query_bounds_and_repeated_page_token(alpaca_env: None, tmp_path: Path) -> None:
+    with pytest.raises(InvalidInputError, match="max_query_days"):
+        AlpacaBarQuery(start=date(2024, 1, 2), end=date(2024, 3, 1), timeframe="1Min")
+
+    looping = [
+        {
+            "bars": [
+                {
+                    "t": "2024-01-02T14:30:00Z",
+                    "o": 100.0,
+                    "h": 100.0,
+                    "l": 100.0,
+                    "c": 100.0,
+                    "v": 1,
+                }
+            ],
+            "next_page_token": "same-token",
+        }
+    ]
+    store = SnapshotStore(tmp_path)
+    with pytest.raises(AlpacaIntegrityError, match="repeated pagination token"):
+        adapter_for_tests(_handler(looping)).ingest(
+            store,
+            dataset_id="loop",
+            revision="1",
+            query=AlpacaBarQuery(start=date(2024, 1, 2), end=date(2024, 1, 2), timeframe="1Min"),
+        )
+    assert not (tmp_path / "loop" / "1").exists()
+
+    oversized = [
+        {
+            "bars": [
+                {
+                    "t": "2024-01-02T14:30:00Z",
+                    "o": 1.0,
+                    "h": 1.0,
+                    "l": 1.0,
+                    "c": 1.0,
+                    "v": 1,
+                }
+            ]
+            * 3,
+            "next_page_token": None,
+        }
+    ]
+    with pytest.raises(AlpacaIntegrityError, match="max_records"):
+        adapter_for_tests(_handler(oversized)).fetch_bars(
+            AlpacaBarQuery(
+                start=date(2024, 1, 2),
+                end=date(2024, 1, 2),
+                timeframe="1Min",
+                max_records=2,
+            )
+        )
+
+
+def test_max_pages_is_enforced(alpaca_env: None) -> None:
+    pages = [
+        {
+            "bars": [
+                {
+                    "t": f"2024-01-02T14:{index:02d}:00Z",
+                    "o": 1.0,
+                    "h": 1.0,
+                    "l": 1.0,
+                    "c": 1.0,
+                    "v": 1,
+                }
+            ],
+            "next_page_token": f"t-{index}",
+        }
+        for index in range(5)
+    ]
+
+    with pytest.raises(AlpacaIntegrityError, match="max_pages"):
+        adapter_for_tests(_handler(pages)).fetch_bars(
+            AlpacaBarQuery(
+                start=date(2024, 1, 2),
+                end=date(2024, 1, 2),
+                timeframe="1Min",
+                max_pages=2,
+            )
+        )
+
+
+def test_failed_ingest_does_not_publish_revision(alpaca_env: None, tmp_path: Path) -> None:
+    bad = [{"bars": [{"t": "2024-01-02T14:30:00Z", "o": 1, "h": 1, "l": 2, "c": 1, "v": 1}]}]
+    store = SnapshotStore(tmp_path)
+    with pytest.raises(AlpacaIntegrityError):
+        adapter_for_tests(_handler(bad)).ingest(
+            store,
+            dataset_id="partial",
+            revision="1",
+            query=AlpacaBarQuery(start=date(2024, 1, 2), end=date(2024, 1, 2), timeframe="1Min"),
+        )
+    assert not (tmp_path / "partial" / "1").exists()
+
+
+def test_minute_gaps_are_not_vendor_failures(alpaca_env: None, tmp_path: Path) -> None:
+    pages = [
+        {
+            "bars": [
+                {
+                    "t": "2024-01-02T14:30:00Z",
+                    "o": 100.0,
+                    "h": 100.1,
+                    "l": 99.9,
+                    "c": 100.0,
+                    "v": 10,
+                },
+                {
+                    "t": "2024-01-02T15:00:00Z",
+                    "o": 100.2,
+                    "h": 100.2,
+                    "l": 100.2,
+                    "c": 100.2,
+                    "v": 0,
+                },
+                {
+                    "t": "2024-01-02T20:00:00Z",
+                    "o": 101.0,
+                    "h": 101.0,
+                    "l": 101.0,
+                    "c": 101.0,
+                    "v": 5,
+                },
+            ],
+            "next_page_token": None,
+        }
+    ]
+    result = adapter_for_tests(_handler(pages)).ingest(
+        SnapshotStore(tmp_path),
+        dataset_id="gaps",
+        revision="1",
+        query=AlpacaBarQuery(start=date(2024, 1, 2), end=date(2024, 1, 2), timeframe="1Min"),
+    )
+    bar = result.bars[0]
+    quality = result.manifest.metadata["session_quality"][0]
+    assert bar.session_open_verified is True
+    assert bar.session_close_verified is False
+    assert "incomplete_close_coverage" in bar.quality_flags
+    assert "observed_minute_gaps" in bar.quality_flags
+    assert "no_trade_intervals" in bar.quality_flags
+    assert "vendor_failure" not in bar.quality_flags
+    assert quality["execution_eligible"] is True
+    assert quality["full_session_validated"] is False
+    assert quality["gap_is_not_vendor_failure"] is True
+    assert quality["no_trade_interval_count"] == 1
+    assert quality["observed_gap_count"] > 0
+    assert bar.close_time.astimezone(EASTERN).hour == 15
+    assert bar.expected_close_time is not None
+    assert bar.expected_close_time.astimezone(EASTERN).hour == 16
+    loaded = SnapshotStore(tmp_path).load("gaps", "1")
+    assert loaded.all_bars()[0].session_close_verified is False
+    assert loaded.manifest.metadata["retrieval_mode"] == "mocked_http"
+    assert loaded.all_bars()[0].vendor_time is not None
+
+
+def test_january_9_2025_is_not_an_expected_session(alpaca_env: None, tmp_path: Path) -> None:
+    pages = [
+        {
+            "bars": [
+                {
+                    "t": "2025-01-08T14:30:00Z",
+                    "o": 10.0,
+                    "h": 10.0,
+                    "l": 10.0,
+                    "c": 10.0,
+                    "v": 1,
+                },
+                {
+                    "t": "2025-01-08T20:59:00Z",
+                    "o": 10.1,
+                    "h": 10.1,
+                    "l": 10.1,
+                    "c": 10.1,
+                    "v": 1,
+                },
+                {
+                    "t": "2025-01-09T14:30:00Z",
+                    "o": 99.0,
+                    "h": 99.0,
+                    "l": 99.0,
+                    "c": 99.0,
+                    "v": 1,
+                },
+                {
+                    "t": "2025-01-10T14:30:00Z",
+                    "o": 11.0,
+                    "h": 11.0,
+                    "l": 11.0,
+                    "c": 11.0,
+                    "v": 1,
+                },
+                {
+                    "t": "2025-01-10T20:59:00Z",
+                    "o": 11.1,
+                    "h": 11.1,
+                    "l": 11.1,
+                    "c": 11.1,
+                    "v": 1,
+                },
+            ],
+            "next_page_token": None,
+        }
+    ]
+    result = adapter_for_tests(_handler(pages)).ingest(
+        SnapshotStore(tmp_path),
+        dataset_id="carter",
+        revision="1",
+        query=AlpacaBarQuery(start=date(2025, 1, 8), end=date(2025, 1, 10), timeframe="1Min"),
+    )
+    dates = {bar.close_time.astimezone(EASTERN).date() for bar in result.bars}
+    assert date(2025, 1, 9) not in dates
+    assert "2025-01-09" not in result.missing_sessions
+    assert {bar.open_time.astimezone(EASTERN).date() for bar in result.bars} == {
+        date(2025, 1, 8),
+        date(2025, 1, 10),
+    }
 
 
 def test_trading_endpoints_are_forbidden(alpaca_env: None) -> None:

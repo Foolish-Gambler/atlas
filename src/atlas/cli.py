@@ -50,8 +50,8 @@ def build_parser() -> argparse.ArgumentParser:
     _add_snapshot_ids(ingest, require_ids=True)
     ingest.add_argument("--recorded", required=True, type=Path, help="Recorded HTTP JSON pages.")
     ingest.add_argument("--timeframe", default="1Min", choices=("1Min", "1Day"))
-    ingest.add_argument("--start", default="2024-01-01")
-    ingest.add_argument("--end", default="2025-12-31")
+    ingest.add_argument("--start", default="2024-01-02")
+    ingest.add_argument("--end", default="2024-01-02")
     ingest.add_argument("--symbol", default="AAPL")
     fetch = alpaca_sub.add_parser(
         "fetch-once",
@@ -59,9 +59,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_snapshot_ids(fetch, require_ids=True)
     fetch.add_argument("--timeframe", default="1Min", choices=("1Min", "1Day"))
-    fetch.add_argument("--start", default="2024-01-01")
-    fetch.add_argument("--end", default="2025-12-31")
+    fetch.add_argument("--start", required=True, help="Inclusive YYYY-MM-DD (bounded query).")
+    fetch.add_argument("--end", required=True, help="Inclusive YYYY-MM-DD (bounded query).")
     fetch.add_argument("--symbol", default="AAPL")
+    fetch.add_argument("--max-query-days", type=int, default=31)
+    fetch.add_argument("--max-pages", type=int, default=20)
+    fetch.add_argument("--max-records", type=int, default=50_000)
 
     paper = subparsers.add_parser("paper", help="Paper-only virtual portfolio helpers.")
     paper_sub = paper.add_subparsers(dest="paper_command", required=True)
@@ -187,6 +190,9 @@ def _alpaca_command(args: argparse.Namespace) -> int:
             start=date.fromisoformat(args.start),
             end=date.fromisoformat(args.end),
             timeframe=args.timeframe,
+            max_query_days=args.max_query_days,
+            max_pages=args.max_pages,
+            max_records=args.max_records,
         )
         result = AlpacaBarsAdapter().ingest(
             SnapshotStore(args.root),

@@ -220,6 +220,7 @@ class SnapshotStore:
         parent = dest.parent
         parent.mkdir(parents=True, exist_ok=True)
         tmp = parent / f".{revision}.tmp-{uuid4().hex}"
+        published = False
         try:
             files, counts, symbols = _write_payload(tmp, payload)
             manifest = SnapshotManifest(
@@ -237,9 +238,12 @@ class SnapshotStore:
             )
             (tmp / MANIFEST_NAME).write_bytes(dumps_canonical(manifest.to_dict()))
             tmp.replace(dest)
+            published = True
         except Exception:
             if tmp.exists():
                 shutil.rmtree(tmp, ignore_errors=True)
+            if not published and dest.exists() and not (dest / MANIFEST_NAME).is_file():
+                shutil.rmtree(dest, ignore_errors=True)
             raise
         if dest.exists() and tmp.exists():
             shutil.rmtree(tmp, ignore_errors=True)

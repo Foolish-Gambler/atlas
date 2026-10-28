@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import os
+import shutil
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
@@ -28,10 +29,14 @@ ADAPTER_VERSION = "atlas.alpaca.bars.v1"
 RETRIEVAL_MOCKED_HTTP = "mocked_http"
 RETRIEVAL_VENDOR_GET = "vendor_get"
 DEFAULT_SYMBOL = "AAPL"
-DEFAULT_START = date(2024, 1, 1)
-DEFAULT_END = date(2025, 12, 31)
+DEFAULT_START = date(2024, 1, 2)
+DEFAULT_END = date(2024, 1, 2)
 DEFAULT_FEED = "iex"
 DEFAULT_ADJUSTMENT = "raw"
+DEFAULT_MAX_QUERY_DAYS = 31
+DEFAULT_MAX_PAGES = 20
+DEFAULT_MAX_RECORDS = 50_000
+_GAP_SAMPLE_LIMIT = 32
 _ALLOWED_TIMEFRAMES = frozenset({"1Day", "1Min"})
 _BARS_PATH = "/v2/stocks/{symbol}/bars"
 
@@ -54,6 +59,9 @@ class AlpacaBarQuery:
     timeframe: str = "1Min"
     currency: str = "USD"
     limit: int = 10_000
+    max_query_days: int = DEFAULT_MAX_QUERY_DAYS
+    max_pages: int = DEFAULT_MAX_PAGES
+    max_records: int = DEFAULT_MAX_RECORDS
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "symbol", normalize_symbol(self.symbol))
@@ -65,6 +73,13 @@ class AlpacaBarQuery:
             raise InvalidInputError("M2 alpaca ingest supports adjustment=raw only.")
         if self.end < self.start:
             raise InvalidInputError("end cannot precede start.")
+        if self.max_query_days < 1 or self.max_pages < 1 or self.max_records < 1:
+            raise InvalidInputError("query bounds must be positive.")
+        span_days = (self.end - self.start).days + 1
+        if span_days > self.max_query_days:
+            raise InvalidInputError(
+                f"query span {span_days} days exceeds max_query_days={self.max_query_days}."
+            )
         if self.start.year not in SUPPORTED_YEARS or self.end.year not in SUPPORTED_YEARS:
             raise UnsupportedCalendarError(
                 "Alpaca ingest query must stay within the maintained NYSE calendar years "
@@ -125,9 +140,14 @@ class AlpacaBarsAdapter:
         query = query or AlpacaBarQuery()
         rows: list[dict[str, Any]] = []
         page_token: str | None = None
+        seen_tokens: set[str] = set()
+        pages = 0
         path = _BARS_PATH.format(symbol=query.symbol)
         url = f"https://{ALPACA_DATA_HOST}{path}"
         while True:
+            pages += 1
+            if pages > query.max_pages:
+                raise AlpacaIntegrityError(f"pagination exceeded max_pages={query.max_pages}.")
             params = {
                 "timeframe": query.timeframe,
                 "start": f"{query.start.isoformat()}T00:00:00Z",
@@ -147,10 +167,16 @@ class AlpacaBarsAdapter:
             if not isinstance(bars, list):
                 raise AlpacaIntegrityError("Alpaca bars must be a list.")
             rows.extend(bars)
+            if len(rows) > query.max_records:
+                raise AlpacaIntegrityError(f"response exceeded max_records={query.max_records}.")
             token = payload.get("next_page_token")
             if not token:
                 break
-            page_token = str(token)
+            token_text = str(token)
+            if token_text in seen_tokens or token_text == page_token:
+                raise AlpacaIntegrityError("repeated pagination token; refusing to loop.")
+            seen_tokens.add(token_text)
+            page_token = token_text
         return rows
 
     def ingest(
@@ -193,15 +219,21 @@ class AlpacaBarsAdapter:
             mocked=mocked,
             ingested_at=ingested_at,
         )
-        manifest = store.create(
-            dataset_id,
-            revision,
-            SnapshotPayload(bars=tuple(bars)),
-            source_kind=provenance.source_kind,
-            vendor="alpaca",
-            created_at=ingested_at,
-            metadata=metadata,
-        )
+        dest = store.revision_path(dataset_id, revision)
+        try:
+            manifest = store.create(
+                dataset_id,
+                revision,
+                SnapshotPayload(bars=tuple(bars)),
+                source_kind=provenance.source_kind,
+                vendor="alpaca",
+                created_at=ingested_at,
+                metadata=metadata,
+            )
+        except Exception:
+            if dest.exists() and not (dest / "manifest.json").is_file():
+                shutil.rmtree(dest, ignore_errors=True)
+            raise
         return AlpacaIngestResult(
             manifest=manifest,
             bars=tuple(bars),
@@ -292,6 +324,7 @@ def _from_daily(
         assert session is not None
         flags = (
             "daily_aggregate_unverified_open",
+            "daily_aggregate_unverified_close",
             "open_is_not_rth_print",
             "execution_unsuitable",
         )
@@ -307,8 +340,11 @@ def _from_daily(
                 close=bar.close,
                 volume=bar.volume,
                 vendor_time=bar.vendor_time,
-                verified=False,
+                open_verified=False,
+                close_verified=False,
+                close_time=session.close,
                 observed_open=None,
+                observed_last=None,
                 flags=flags,
             )
         )
@@ -318,8 +354,10 @@ def _from_daily(
                 observed_open=None,
                 observed_last=None,
                 open_interval_observed=False,
+                close_interval_observed=False,
                 open_volume=None,
-                verified=False,
+                open_verified=False,
+                close_verified=False,
                 flags=flags,
             )
         )
@@ -352,21 +390,38 @@ def _from_minutes(
         if len(times) != len(set(times)):
             raise AlpacaIntegrityError(f"duplicate minute bars for {day.isoformat()}")
         first, last = ordered[0], ordered[-1]
-        opening = [item for item in ordered if item.vendor_time.astimezone(EASTERN) == session.open]
+        by_minute = {item.vendor_time.astimezone(EASTERN): item for item in ordered}
+        expected_minutes = _expected_minutes(session)
+        opening = by_minute.get(session.open)
+        last_expected = session.close - timedelta(minutes=1)
+        closing = by_minute.get(last_expected)
+        gaps = [stamp for stamp in expected_minutes if stamp not in by_minute]
+        no_trades = [
+            stamp.isoformat() for stamp, item in sorted(by_minute.items()) if item.volume == 0
+        ]
         flags: list[str] = ["open_is_one_minute_bucket"]
-        open_interval_observed = bool(opening)
-        open_volume = opening[0].volume if opening else None
-        if not opening:
+        open_interval_observed = opening is not None
+        open_volume = opening.volume if opening is not None else None
+        if opening is None:
             flags.append("open_interval_missing")
         elif open_volume == 0:
             flags.append("open_interval_zero_volume")
-        last_expected = session.close - timedelta(minutes=1)
-        if last.vendor_time.astimezone(EASTERN) != last_expected:
-            flags.append("session_incomplete")
-        verified = bool(opening) and (open_volume or 0) > 0
-        if not verified:
+        close_verified = closing is not None
+        if not close_verified:
+            flags.append("incomplete_close_coverage")
+        if gaps:
+            flags.append("observed_minute_gaps")
+        if no_trades:
+            flags.append("no_trade_intervals")
+        open_verified = opening is not None and (open_volume or 0) > 0
+        if not open_verified:
             flags.append("execution_unsuitable")
-        open_px = opening[0].open if verified else first.open
+        full_session = open_interval_observed and close_verified and not gaps
+        if not full_session:
+            flags.append("session_incomplete")
+        open_px = opening.open if open_verified else first.open
+        observed_last = last.vendor_time.astimezone(EASTERN)
+        close_time = session.close if close_verified else observed_last + timedelta(minutes=1)
         records.append(
             _session_bar(
                 query.symbol,
@@ -379,8 +434,11 @@ def _from_minutes(
                 close=last.close,
                 volume=sum(item.volume for item in ordered),
                 vendor_time=first.vendor_time,
-                verified=verified,
+                open_verified=open_verified,
+                close_verified=close_verified,
+                close_time=close_time,
                 observed_open=first.vendor_time.astimezone(EASTERN),
+                observed_last=observed_last,
                 flags=tuple(flags),
             )
         )
@@ -388,11 +446,19 @@ def _from_minutes(
             _quality_row(
                 session,
                 observed_open=first.vendor_time.astimezone(EASTERN),
-                observed_last=last.vendor_time.astimezone(EASTERN),
+                observed_last=observed_last,
                 open_interval_observed=open_interval_observed,
+                close_interval_observed=close_verified,
                 open_volume=open_volume,
-                verified=verified,
+                open_verified=open_verified,
+                close_verified=close_verified,
                 flags=tuple(flags),
+                expected_minute_count=len(expected_minutes),
+                observed_minute_count=len(by_minute),
+                no_trade_interval_count=len(no_trades),
+                observed_gap_count=len(gaps),
+                observed_gaps=[stamp.isoformat() for stamp in gaps[:_GAP_SAMPLE_LIMIT]],
+                no_trade_intervals=no_trades[:_GAP_SAMPLE_LIMIT],
             )
         )
     return records, missing, qualities
@@ -410,15 +476,18 @@ def _session_bar(
     close: float,
     volume: int,
     vendor_time: datetime,
-    verified: bool,
+    open_verified: bool,
+    close_verified: bool,
+    close_time: datetime,
     observed_open: datetime | None,
+    observed_last: datetime | None,
     flags: tuple[str, ...],
 ) -> MarketBarRecord:
     return MarketBarRecord(
         symbol=symbol,
-        open_time=session.open if verified else (observed_open or session.open),
-        close_time=session.close,
-        available_time=session.close,
+        open_time=session.open if open_verified else (observed_open or session.open),
+        close_time=close_time,
+        available_time=close_time,
         provenance=provenance,
         open=open_px,
         high=high,
@@ -427,10 +496,13 @@ def _session_bar(
         volume=volume,
         ingested_time=ingested_at,
         vendor_time=vendor_time,
-        session_open_verified=verified,
+        session_open_verified=open_verified,
+        session_close_verified=close_verified,
         requires_open_interval_evidence=True,
         expected_open_time=session.open,
+        expected_close_time=session.close,
         observed_open_time=observed_open,
+        observed_last_time=observed_last,
         quality_flags=flags,
     )
 
@@ -441,10 +513,24 @@ def _quality_row(
     observed_open: datetime | None,
     observed_last: datetime | None,
     open_interval_observed: bool,
+    close_interval_observed: bool,
     open_volume: int | None,
-    verified: bool,
+    open_verified: bool,
+    close_verified: bool,
     flags: tuple[str, ...],
+    expected_minute_count: int | None = None,
+    observed_minute_count: int | None = None,
+    no_trade_interval_count: int = 0,
+    observed_gap_count: int = 0,
+    observed_gaps: list[str] | None = None,
+    no_trade_intervals: list[str] | None = None,
 ) -> dict[str, Any]:
+    full_session = bool(
+        open_interval_observed
+        and close_interval_observed
+        and observed_gap_count == 0
+        and (expected_minute_count is None or observed_minute_count == expected_minute_count)
+    )
     return {
         "session_date": session.session_date.isoformat(),
         "expected_open": session.open.isoformat(),
@@ -452,9 +538,19 @@ def _quality_row(
         "observed_open": observed_open.isoformat() if observed_open else None,
         "observed_last": observed_last.isoformat() if observed_last else None,
         "open_interval_observed": open_interval_observed,
+        "close_interval_observed": close_interval_observed,
         "open_volume": open_volume,
-        "session_open_verified": verified,
-        "execution_eligible": verified,
+        "session_open_verified": open_verified,
+        "session_close_verified": close_verified,
+        "execution_eligible": open_verified,
+        "full_session_validated": full_session,
+        "expected_minute_count": expected_minute_count,
+        "observed_minute_count": observed_minute_count,
+        "no_trade_interval_count": no_trade_interval_count,
+        "observed_gap_count": observed_gap_count,
+        "observed_gaps": list(observed_gaps or ()),
+        "no_trade_intervals": list(no_trade_intervals or ()),
+        "gap_is_not_vendor_failure": True,
         "flags": list(flags),
     }
 
@@ -495,10 +591,28 @@ def _ingest_metadata(
         "path": _BARS_PATH.format(symbol=query.symbol),
         "ingested_at": ingested_at.isoformat(),
         "execution_eligible": eligible,
+        "full_session_validated": any(
+            bool(item.get("full_session_validated")) for item in qualities
+        ),
         "missing_sessions": list(missing),
         "session_quality": qualities,
+        "query_bounds": {
+            "max_query_days": query.max_query_days,
+            "max_pages": query.max_pages,
+            "max_records": query.max_records,
+        },
         "price_disclaimer": disclaimer,
     }
+
+
+def _expected_minutes(session: NyseSession) -> list[datetime]:
+    stamps: list[datetime] = []
+    cursor = session.open
+    last = session.close - timedelta(minutes=1)
+    while cursor <= last:
+        stamps.append(cursor)
+        cursor += timedelta(minutes=1)
+    return stamps
 
 
 def redacted_query_url(query: AlpacaBarQuery) -> str:
