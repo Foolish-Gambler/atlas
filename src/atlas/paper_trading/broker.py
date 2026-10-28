@@ -130,6 +130,17 @@ class PaperBroker:
             raise MissingMarkError("Marked equity is unavailable.")
         return snap.equity
 
+    def apply_cash_charge(self, amount: float, reason: str) -> None:
+        """Deduct simulated fees after a fill. Never used for live brokerage."""
+
+        assert_paper_only(self.settings)
+        charge = require_non_negative_finite(amount, "amount")
+        if charge == 0:
+            return
+        if charge > self.cash:
+            raise SafetyError(f"insufficient cash for {reason}")
+        self.cash -= charge
+
     def simulated_fill_price(self, signal: Signal, fill_price: float | None = None) -> float:
         """Return the broker-controlled simulated fill.
 

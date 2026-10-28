@@ -282,6 +282,12 @@ class ReadOnlyBarSource(Protocol):
     def bars(self, symbol: str) -> Sequence[MarketBarRecord]: ...
 
 
+class ReadOnlyEventSource(Protocol):
+    """Point-in-time event stream. Implementations must not place orders or call the network."""
+
+    def stream(self) -> Sequence[StreamEvent]: ...
+
+
 def sort_stream(events: Iterable[StreamEvent]) -> list[StreamEvent]:
     return sorted(
         events,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from atlas.domain import PortfolioSnapshot, Signal, SignalSide
@@ -72,10 +73,16 @@ class RiskDecision:
 
 
 class RiskManager:
-    def __init__(self, limits: RiskLimits | None = None) -> None:
+    def __init__(
+        self,
+        limits: RiskLimits | None = None,
+        *,
+        id_factory: Callable[[], str] | None = None,
+    ) -> None:
         self.limits = limits or RiskLimits()
         self._issued: dict[str, RiskDecision] = {}
         self._consumed: set[str] = set()
+        self._new_id = id_factory or (lambda: uuid.uuid4().hex)
 
     def lookup(self, decision_id: str) -> RiskDecision | None:
         if not decision_id:
@@ -129,7 +136,7 @@ class RiskManager:
             approved=not reasons,
             reasons=tuple(reasons),
             signal=signal,
-            decision_id=uuid.uuid4().hex,
+            decision_id=self._new_id(),
         )
         self._issued[decision.decision_id] = decision
         return decision

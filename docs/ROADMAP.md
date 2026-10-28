@@ -8,7 +8,9 @@
 
 남은 정리: 제품 비전 문서, 안정 데이터 계약 (`atlas.contracts`), 이벤트 시계의 **설계·타입** (본 작업).
 
-## 마일스톤 1 — 다음 개발 작업 (우선)
+## 마일스톤 1 — 구현 중 (PIT 백테스트 + 로컬 픽스처)
+
+코드: `PitBacktestEngine`, `LocalFixtureSource`, `EventClock` 뷰, JSONL 저널. 기존 `BacktestEngine`은 룩어헤드가 있으므로 레거시로 유지한다.
 
 **목표:** 포인트-인-타임 이벤트 시계와 **읽기 전용** 로컬 적재. 네트워크 벤더와 LLM은 아직 없다.
 
