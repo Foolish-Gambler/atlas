@@ -78,6 +78,7 @@ class SnapshotPayload:
     research: tuple[ResearchArtifact, ...] = ()
     predictions: tuple[ReturnPrediction, ...] = ()
     ensembles: tuple[EnsemblePrediction, ...] = ()
+    vendor_raw: tuple[dict[str, Any], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,6 +137,7 @@ class SnapshotSource:
         self._research = payload.research
         self._predictions = payload.predictions
         self._ensembles = payload.ensembles
+        self._vendor_raw = payload.vendor_raw
         self._by_ref = {bar.ref_id: bar for bar in self._bars}
         self._events = build_stream(
             self._bars,
@@ -171,6 +173,9 @@ class SnapshotSource:
 
     def ensembles(self) -> tuple[EnsemblePrediction, ...]:
         return self._ensembles
+
+    def vendor_raw(self) -> tuple[dict[str, Any], ...]:
+        return self._vendor_raw
 
     def stream(self) -> Sequence[StreamEvent]:
         return self._events
@@ -345,6 +350,7 @@ def _stamp_payload(payload: SnapshotPayload, ingested: datetime) -> SnapshotPayl
         research=research,
         predictions=predictions,
         ensembles=ensembles,
+        vendor_raw=payload.vendor_raw,
     )
 
 
@@ -394,6 +400,10 @@ def _write_payload(
         "predictions", payload.predictions, lambda item: item.prediction_id, prediction_to_row
     )
     write_json_dir("ensembles", payload.ensembles, lambda item: item.ensemble_id, ensemble_to_row)
+    if payload.vendor_raw:
+        (root / "vendor").mkdir()
+        rel = "vendor/raw_bars.jsonl"
+        files[rel] = _write_jsonl(root / rel, [dict(row) for row in payload.vendor_raw])
 
     counts = {
         "bars": len(payload.bars),
@@ -403,6 +413,7 @@ def _write_payload(
         "research": len(payload.research),
         "predictions": len(payload.predictions),
         "ensembles": len(payload.ensembles),
+        "vendor_raw": len(payload.vendor_raw),
     }
     symbols = tuple(sorted({bar.symbol for bar in payload.bars}))
     return files, counts, symbols
@@ -523,6 +534,7 @@ def _read_payload(path: Path, manifest: SnapshotManifest) -> SnapshotPayload:
     research: list[ResearchArtifact] = []
     predictions: list[ReturnPrediction] = []
     ensembles: list[EnsemblePrediction] = []
+    vendor_raw: list[dict[str, Any]] = []
     parsers = {
         "bars": lambda file_path: bars.extend(
             parse_bar(row, provenance, require_ingested=True) for row in _load_jsonl(file_path)
@@ -545,6 +557,7 @@ def _read_payload(path: Path, manifest: SnapshotManifest) -> SnapshotPayload:
         "ensembles": lambda file_path: ensembles.append(
             parse_ensemble(_load_json(file_path), provenance, require_ingested=True)
         ),
+        "vendor": lambda file_path: vendor_raw.extend(_load_jsonl(file_path)),
     }
     for rel in sorted(manifest.files):
         kind = rel.split("/", 1)[0]
@@ -560,4 +573,5 @@ def _read_payload(path: Path, manifest: SnapshotManifest) -> SnapshotPayload:
         research=tuple(research),
         predictions=tuple(predictions),
         ensembles=tuple(ensembles),
+        vendor_raw=tuple(vendor_raw),
     )

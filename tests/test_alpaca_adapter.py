@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import date
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 import httpx
@@ -474,6 +474,74 @@ def test_minute_gaps_are_not_vendor_failures(alpaca_env: None, tmp_path: Path) -
     assert loaded.all_bars()[0].session_close_verified is False
     assert loaded.manifest.metadata["retrieval_mode"] == "mocked_http"
     assert loaded.all_bars()[0].vendor_time is not None
+    assert result.manifest.metadata["full_session_validated"] is False
+    assert result.manifest.metadata["validated_session_count"] == 0
+    assert result.manifest.metadata["incomplete_session_count"] == 1
+    assert result.execution_eligible is True
+    assert loaded.vendor_raw()
+    assert "vendor/raw_bars.jsonl" in loaded.manifest.files
+
+
+def test_mixed_session_quality_does_not_mark_dataset_complete(
+    alpaca_env: None, tmp_path: Path
+) -> None:
+    def minutes(day: date, *, skip_last: bool) -> list[dict]:
+        start = datetime(day.year, day.month, day.day, 9, 30, tzinfo=EASTERN).astimezone(UTC)
+        count = 390
+        rows = []
+        for index in range(count):
+            if skip_last and index == count - 1:
+                continue
+            stamp = start + timedelta(minutes=index)
+            rows.append(
+                {
+                    "t": stamp.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    "o": 100.0,
+                    "h": 100.2,
+                    "l": 99.8,
+                    "c": 100.1,
+                    "v": 4,
+                }
+            )
+        return rows
+
+    pages = [
+        {
+            "bars": minutes(date(2024, 1, 2), skip_last=False)
+            + minutes(date(2024, 1, 3), skip_last=True),
+            "next_page_token": None,
+        }
+    ]
+    store = SnapshotStore(tmp_path)
+    result = adapter_for_tests(_handler(pages)).ingest(
+        store,
+        dataset_id="mixed-quality",
+        revision="agg-1",
+        query=AlpacaBarQuery(start=date(2024, 1, 2), end=date(2024, 1, 3), timeframe="1Min"),
+    )
+    qualities = result.manifest.metadata["session_quality"]
+    assert len(qualities) == 2
+    assert qualities[0]["full_session_validated"] is True
+    assert qualities[1]["full_session_validated"] is False
+    assert result.manifest.metadata["full_session_validated"] is False
+    assert result.manifest.metadata["validated_session_count"] == 1
+    assert result.manifest.metadata["incomplete_session_count"] == 1
+    assert result.manifest.metadata["included_session_count"] == 2
+    assert result.manifest.metadata["missing_session_count"] == 0
+    assert result.execution_eligible is True
+    assert result.manifest.metadata["execution_eligible"] is True
+    loaded = store.load("mixed-quality", "agg-1")
+    assert loaded.manifest.counts["vendor_raw"] == 779
+    assert len(loaded.vendor_raw()) == 779
+    digest = loaded.manifest.files["vendor/raw_bars.jsonl"]
+    assert len(digest) == 64
+    with pytest.raises(RevisionExistsError):
+        adapter_for_tests(_handler(pages)).ingest(
+            store,
+            dataset_id="mixed-quality",
+            revision="agg-1",
+            query=AlpacaBarQuery(start=date(2024, 1, 2), end=date(2024, 1, 3), timeframe="1Min"),
+        )
 
 
 def test_january_9_2025_is_not_an_expected_session(alpaca_env: None, tmp_path: Path) -> None:

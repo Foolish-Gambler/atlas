@@ -224,7 +224,10 @@ class AlpacaBarsAdapter:
             manifest = store.create(
                 dataset_id,
                 revision,
-                SnapshotPayload(bars=tuple(bars)),
+                SnapshotPayload(
+                    bars=tuple(bars),
+                    vendor_raw=tuple(dict(row) for row in raw_rows if isinstance(row, dict)),
+                ),
                 source_kind=provenance.source_kind,
                 vendor="alpaca",
                 created_at=ingested_at,
@@ -591,9 +594,7 @@ def _ingest_metadata(
         "path": _BARS_PATH.format(symbol=query.symbol),
         "ingested_at": ingested_at.isoformat(),
         "execution_eligible": eligible,
-        "full_session_validated": any(
-            bool(item.get("full_session_validated")) for item in qualities
-        ),
+        **_dataset_session_rollup(qualities, missing),
         "missing_sessions": list(missing),
         "session_quality": qualities,
         "query_bounds": {
@@ -602,6 +603,23 @@ def _ingest_metadata(
             "max_records": query.max_records,
         },
         "price_disclaimer": disclaimer,
+    }
+
+
+def _dataset_session_rollup(
+    qualities: list[dict[str, Any]], missing: tuple[str, ...]
+) -> dict[str, Any]:
+    validated = sum(1 for item in qualities if item.get("full_session_validated"))
+    included = len(qualities)
+    incomplete = included - validated
+    missing_count = len(missing)
+    full = included > 0 and incomplete == 0 and missing_count == 0
+    return {
+        "full_session_validated": full,
+        "included_session_count": included,
+        "validated_session_count": validated,
+        "incomplete_session_count": incomplete,
+        "missing_session_count": missing_count,
     }
 
 
