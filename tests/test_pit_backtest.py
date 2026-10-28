@@ -5,15 +5,22 @@ from pathlib import Path
 
 import pytest
 
-from atlas.backtesting import ExecutionModel, NextOpenBuyStrategy, PitBacktestEngine
+from atlas.backtesting import (
+    ExecutionModel,
+    NextOpenBuyStrategy,
+    PitBacktestEngine,
+    SingleSymbolError,
+)
 from atlas.backtesting.view import MarketView
 from atlas.config import AtlasSettings
 from atlas.contracts import EventClock
-from atlas.domain import Signal
+from atlas.domain import Signal, TradingMode
 from atlas.ingest import LocalFixtureSource
 from atlas.risk import RiskManager
 
 FIXTURE = Path(__file__).parent / "fixtures" / "pit" / "m1_sim_a.json"
+DELAYED = Path(__file__).parent / "fixtures" / "pit" / "m1_delayed.json"
+MIXED = Path(__file__).parent / "fixtures" / "pit" / "m1_mixed_symbols.json"
 
 
 class SpyStrategy:
@@ -37,6 +44,7 @@ def test_pit_fills_next_open_not_same_close(settings: AtlasSettings) -> None:
     assert fills[0]["open"] == 102.0
     assert fills[0]["fill_price"] == 102.0
     assert fills[0]["origin_event_id"] != fills[0]["execute_event_id"]
+    assert fills[0]["execution_time"] > fills[0]["decision_time"]
     assert result.cancelled == 1
 
 
@@ -89,6 +97,41 @@ def test_reproducible_journal(settings: AtlasSettings) -> None:
     assert first.journal.dumps() == second.journal.dumps()
     assert first.ending_cash == second.ending_cash
     assert first.fills == second.fills
+
+
+def test_mixed_symbol_fixtures_are_rejected(settings: AtlasSettings) -> None:
+    source = LocalFixtureSource(MIXED)
+    with pytest.raises(SingleSymbolError, match="single symbol"):
+        PitBacktestEngine(settings=settings).run(source, run_id="mixed")
+
+
+def test_delayed_bar_does_not_fill_at_earlier_open(settings: AtlasSettings) -> None:
+    source = LocalFixtureSource(DELAYED)
+    result = PitBacktestEngine(settings=settings).run(
+        source, NextOpenBuyStrategy(quantity=1), run_id="delayed"
+    )
+    fills = [row for row in result.journal.records if row["type"] == "fill"]
+    assert len(fills) == 1
+    assert fills[0]["open"] == 105.0
+    assert fills[0]["fill_price"] == 105.0
+    assert fills[0]["execution_time"] > fills[0]["decision_time"]
+    assert "2024-01-03T14:30:00" not in fills[0]["execute_event_id"]
+
+
+def test_insufficient_commission_rolls_back(settings: AtlasSettings) -> None:
+    tight = AtlasSettings(
+        trading_mode=TradingMode.PAPER,
+        starting_cash=100.0,
+        live_broker_connected=False,
+    )
+    source = LocalFixtureSource(FIXTURE)
+    result = PitBacktestEngine(
+        settings=tight,
+        execution=ExecutionModel(commission_per_share=1.0),
+    ).run(source, NextOpenBuyStrategy(quantity=1), run_id="no-fee-cash")
+    assert result.fills == 0
+    assert result.ending_cash == 100.0
+    assert any(row["type"] == "reject" for row in result.journal.records)
 
 
 def test_local_fixture_rejects_vendor_claim(tmp_path: Path) -> None:

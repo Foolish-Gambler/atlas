@@ -21,6 +21,10 @@ from atlas.risk.manager import RiskDecision, RiskManager
 from atlas.safety import SafetyError
 
 
+class SingleSymbolError(ValueError):
+    """M1 pit replay supports one tradable symbol."""
+
+
 @dataclass(frozen=True, slots=True)
 class PitBacktestResult:
     run_id: str
@@ -34,8 +38,17 @@ class PitBacktestResult:
     journal: JsonlJournal
 
 
+@dataclass(frozen=True, slots=True)
+class _Pending:
+    decision: RiskDecision
+    signal: Signal
+    origin_event_id: str
+    decision_time: datetime
+    symbol: str
+
+
 class PitBacktestEngine:
-    """Replay local fixtures: decide on available close, fill at the next bar open."""
+    """Replay local fixtures: decide on available close, fill at a later same-symbol open."""
 
     def __init__(
         self,
@@ -62,19 +75,27 @@ class PitBacktestEngine:
         bars = _ordered_bars(source.all_bars())
         if not bars:
             raise ValueError("bars are required.")
+        symbols = {bar.symbol for bar in bars}
+        if len(symbols) != 1:
+            raise SingleSymbolError(
+                "M1 pit backtests support a single symbol; "
+                f"got {sorted(symbols)}. Multi-asset scheduling is not implemented."
+            )
         risk = RiskManager(limits=self.risk.limits, id_factory=_stable_ids(run_id))
         broker = PaperBroker.from_settings(self.settings, risk=risk)
-        pending: tuple[RiskDecision, Signal, str] | None = None
+        pending: _Pending | None = None
         rejected = 0
         cancelled = 0
         equity_curve: list[float] = []
 
-        for index, bar in enumerate(bars):
-            if pending is not None:
+        for bar in bars:
+            if pending is not None and _is_eligible_fill(pending, bar):
                 filled = self._execute_pending(broker, pending, bar, run_id, journal)
                 if not filled:
                     rejected += 1
                 pending = None
+            elif pending is not None and bar.symbol != pending.symbol:
+                raise SafetyError("pending order cannot execute on a different symbol's bar")
 
             self._mark_close(broker, bar)
             view = build_view(
@@ -89,10 +110,15 @@ class PitBacktestEngine:
                     "visible_event_ids": [event.event_id for event in view.events],
                 }
             )
+            if pending is not None:
+                equity_curve.append(broker.marked_equity())
+                continue
             signal = strategy.on_as_of(view)
             if signal is None or signal.side is SignalSide.HOLD:
                 equity_curve.append(broker.marked_equity())
                 continue
+            if signal.symbol != bar.symbol:
+                raise SafetyError("M1 strategy signal must match the fixture symbol")
             decision = broker.risk.evaluate(signal, broker.snapshot())
             journal.append(
                 {
@@ -113,19 +139,26 @@ class PitBacktestEngine:
                 rejected += 1
                 equity_curve.append(broker.marked_equity())
                 continue
-            if index == len(bars) - 1:
-                cancelled += 1
-                journal.append(
-                    {
-                        "type": "cancel",
-                        "run_id": run_id,
-                        "reason": "no_next_bar",
-                        "decision_id": decision.decision_id,
-                    }
-                )
-            else:
-                pending = (decision, signal, f"bar:{bar.symbol}:{bar.time.event_time.isoformat()}")
+            pending = _Pending(
+                decision=decision,
+                signal=signal,
+                origin_event_id=f"bar:{bar.symbol}:{bar.time.event_time.isoformat()}",
+                decision_time=bar.time.available_time,
+                symbol=signal.symbol,
+            )
             equity_curve.append(broker.marked_equity())
+
+        if pending is not None:
+            cancelled += 1
+            journal.append(
+                {
+                    "type": "cancel",
+                    "run_id": run_id,
+                    "reason": "no_later_same_symbol_bar",
+                    "decision_id": pending.decision.decision_id,
+                    "decision_time": pending.decision_time.isoformat(),
+                }
+            )
 
         journal.persist()
         return PitBacktestResult(
@@ -143,39 +176,53 @@ class PitBacktestEngine:
     def _execute_pending(
         self,
         broker: PaperBroker,
-        pending: tuple[RiskDecision, Signal, str],
+        pending: _Pending,
         bar: MarketBarRecord,
         run_id: str,
         journal: JsonlJournal,
     ) -> bool:
-        decision, signal, origin_event_id = pending
-        fill_price = slipped_price(bar.open, signal.side, self.execution)
-        fee = commission(signal, fill_price, self.execution)
+        if bar.symbol != pending.symbol:
+            raise SafetyError("pending order cannot execute on a different symbol's bar")
+        if bar.time.event_time <= pending.decision_time:
+            raise SafetyError("execution timestamp must be after the decision timestamp")
+        fill_price = slipped_price(bar.open, pending.signal.side, self.execution)
+        fee = commission(pending.signal, fill_price, self.execution)
+        cash_before = broker.cash
+        positions_before = dict(broker.positions)
+        fills_before = len(broker.fills)
         try:
-            fill = broker.submit(decision, fill_price=fill_price)
-            if fee:
-                broker.apply_cash_charge(fee, "simulated commission")
+            fill = broker.submit(pending.decision, fill_price=fill_price, commission=fee)
         except SafetyError as exc:
+            if (
+                broker.cash != cash_before
+                or dict(broker.positions) != positions_before
+                or len(broker.fills) != fills_before
+                or broker.risk.is_consumed(pending.decision.decision_id)
+            ):
+                raise SafetyError("rejected fill mutated paper state") from exc
             journal.append(
                 {
                     "type": "reject",
                     "run_id": run_id,
-                    "origin_event_id": origin_event_id,
+                    "origin_event_id": pending.origin_event_id,
                     "execute_event_id": f"bar:{bar.symbol}:{bar.time.event_time.isoformat()}",
+                    "decision_time": pending.decision_time.isoformat(),
+                    "execution_time": bar.time.event_time.isoformat(),
                     "open": bar.open,
                     "intended_fill_price": fill_price,
+                    "commission": fee,
                     "error": str(exc),
                 }
             )
             return False
-        self._log_fill(journal, run_id, origin_event_id, bar, fill, fill_price, fee, broker)
+        self._log_fill(journal, run_id, pending, bar, fill, fill_price, fee, broker)
         return True
 
     def _log_fill(
         self,
         journal: JsonlJournal,
         run_id: str,
-        origin_event_id: str,
+        pending: _Pending,
         bar: MarketBarRecord,
         fill: PaperFill,
         fill_price: float,
@@ -186,8 +233,10 @@ class PitBacktestEngine:
             {
                 "type": "fill",
                 "run_id": run_id,
-                "origin_event_id": origin_event_id,
+                "origin_event_id": pending.origin_event_id,
                 "execute_event_id": f"bar:{bar.symbol}:{bar.time.event_time.isoformat()}",
+                "decision_time": pending.decision_time.isoformat(),
+                "execution_time": bar.time.event_time.isoformat(),
                 "fill_id": fill.fill_id,
                 "risk_decision_id": fill.risk_decision_id,
                 "symbol": fill.symbol,
@@ -198,7 +247,6 @@ class PitBacktestEngine:
                 "reference_price": fill.reference_price,
                 "commission": fee,
                 "cash_after": broker.cash,
-                "equity_after_open": None,
                 "simulated": True,
             }
         )
@@ -223,6 +271,10 @@ class PitBacktestEngine:
         for event in view.events:
             if event.time.available_time > as_of:
                 raise SafetyError("strategy view leaked an event after as_of")
+
+
+def _is_eligible_fill(pending: _Pending, bar: MarketBarRecord) -> bool:
+    return bar.symbol == pending.symbol and bar.time.event_time > pending.decision_time
 
 
 def _stable_ids(run_id: str) -> Callable[[], str]:

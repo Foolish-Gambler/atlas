@@ -1,0 +1,37 @@
+{
+  "dataset_id": "m1-delayed",
+  "revision": "1",
+  "source_kind": "simulated",
+  "bars": [
+    {
+      "symbol": "SIM-A",
+      "event_time": "2024-01-02T21:00:00+00:00",
+      "available_time": "2024-01-03T16:00:00+00:00",
+      "open": 100.0,
+      "high": 101.0,
+      "low": 99.0,
+      "close": 100.0,
+      "volume": 1000
+    },
+    {
+      "symbol": "SIM-A",
+      "event_time": "2024-01-03T14:30:00+00:00",
+      "available_time": "2024-01-03T14:30:00+00:00",
+      "open": 110.0,
+      "high": 111.0,
+      "low": 109.0,
+      "close": 111.0,
+      "volume": 1100
+    },
+    {
+      "symbol": "SIM-A",
+      "event_time": "2024-01-04T14:30:00+00:00",
+      "available_time": "2024-01-04T14:30:00+00:00",
+      "open": 105.0,
+      "high": 106.0,
+      "low": 104.0,
+      "close": 106.0,
+      "volume": 1200
+    }
+  ]
+}

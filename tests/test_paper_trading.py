@@ -70,6 +70,32 @@ def test_cannot_submit_hold(settings: AtlasSettings) -> None:
         broker.submit(decision)
 
 
+def test_submit_with_commission_is_atomic(settings: AtlasSettings) -> None:
+    tight = AtlasSettings(
+        trading_mode=TradingMode.PAPER,
+        starting_cash=200.0,
+        live_broker_connected=False,
+    )
+    broker = PaperBroker.from_settings(tight)
+    signal = Signal(
+        symbol="SIM-A",
+        side=SignalSide.BUY,
+        quantity=2,
+        reference_price=100.0,
+        confidence=0.9,
+        rationale="test",
+        source="test",
+    )
+    decision = broker.risk.evaluate(signal, broker.snapshot())
+    assert decision.approved is True
+    with pytest.raises(SafetyError, match="including commission"):
+        broker.submit(decision, fill_price=100.0, commission=1.0)
+    assert broker.cash == 200.0
+    assert broker.positions == {}
+    assert broker.fills == []
+    assert broker.risk.is_consumed(decision.decision_id) is False
+
+
 def test_snapshot_is_a_copy(settings: AtlasSettings) -> None:
     broker = PaperBroker.from_settings(settings)
     snap: PortfolioSnapshot = broker.snapshot()

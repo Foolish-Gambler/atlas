@@ -41,6 +41,7 @@ class PaperFill:
     cash_after: float = 0.0
     risk_decision_id: str = ""
     reference_price: float = 0.0
+    commission: float = 0.0
 
 
 @dataclass
@@ -155,7 +156,13 @@ class PaperBroker:
             return mark.price
         return signal.reference_price
 
-    def submit(self, decision: RiskDecision, *, fill_price: float | None = None) -> PaperFill:
+    def submit(
+        self,
+        decision: RiskDecision,
+        *,
+        fill_price: float | None = None,
+        commission: float = 0.0,
+    ) -> PaperFill:
         assert_paper_only(self.settings)
         issued = self._require_issued(decision)
         if self.risk.is_consumed(issued.decision_id):
@@ -165,7 +172,7 @@ class PaperBroker:
         if not live.approved:
             raise SafetyError(f"Signal rejected by risk: {live.summary}")
         price = self.simulated_fill_price(issued.signal, fill_price)
-        fill = self._apply(issued.signal, issued.decision_id, price)
+        fill = self._apply(issued.signal, issued.decision_id, price, commission)
         self.risk.consume(issued.decision_id)
         return fill
 
@@ -181,15 +188,23 @@ class PaperBroker:
             raise SafetyError("previously rejected RiskDecision cannot be executed")
         return issued
 
-    def _apply(self, signal: Signal, decision_id: str, fill_price: float) -> PaperFill:
+    def _apply(
+        self,
+        signal: Signal,
+        decision_id: str,
+        fill_price: float,
+        commission: float = 0.0,
+    ) -> PaperFill:
         fill_price = require_positive_finite(fill_price, "fill_price")
+        fee = require_non_negative_finite(commission, "commission")
         notional = signal.quantity * fill_price
         if notional > self.risk.limits.max_notional:
             raise SafetyError("fill notional exceeds max_notional")
         if signal.side is SignalSide.BUY:
-            if notional > self.cash:
-                raise SafetyError("insufficient cash for buy")
-            new_cash = self.cash - notional
+            total = notional + fee
+            if total > self.cash:
+                raise SafetyError("insufficient cash for buy including commission")
+            new_cash = self.cash - total
             new_qty = self.positions.get(signal.symbol, 0) + signal.quantity
             if new_cash < 0 or new_qty < 0:
                 raise SafetyError("order would make cash or holdings negative.")
@@ -199,7 +214,7 @@ class PaperBroker:
             current_qty = self.positions.get(signal.symbol, 0)
             if signal.quantity > current_qty:
                 raise SafetyError("cannot sell more than the current paper position")
-            new_cash = self.cash + notional
+            new_cash = self.cash + notional - fee
             remaining = current_qty - signal.quantity
             if new_cash < 0 or remaining < 0:
                 raise SafetyError("order would make cash or holdings negative.")
@@ -230,6 +245,7 @@ class PaperBroker:
             cash_after=self.cash,
             risk_decision_id=decision_id,
             reference_price=signal.reference_price,
+            commission=fee,
         )
         self._next_fill_id += 1
         self.fills.append(fill)
