@@ -1,0 +1,45 @@
+"""Process configuration. Secrets are never stored here."""
+
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass
+
+from atlas.domain import TradingMode
+
+_ALLOWED_MODES = frozenset({TradingMode.PAPER})
+
+
+@dataclass(frozen=True, slots=True)
+class AtlasSettings:
+    """Runtime settings loaded from environment with safe defaults.
+
+    `ATLAS_TRADING_MODE` is accepted only when set to `paper`. Any other
+    value is rejected at load time so live mode cannot be enabled by accident.
+    """
+
+    trading_mode: TradingMode = TradingMode.PAPER
+    starting_cash: float = 100_000.0
+    live_broker_connected: bool = False
+
+    @classmethod
+    def load(cls) -> AtlasSettings:
+        raw_mode = os.environ.get("ATLAS_TRADING_MODE", TradingMode.PAPER.value)
+        try:
+            mode = TradingMode(raw_mode.strip().lower())
+        except ValueError as exc:
+            raise ValueError(
+                f"Invalid ATLAS_TRADING_MODE={raw_mode!r}. Only 'paper' is allowed."
+            ) from exc
+        if mode not in _ALLOWED_MODES:
+            raise ValueError(
+                "ATLAS_TRADING_MODE cannot enable live trading. Only 'paper' is allowed."
+            )
+        starting_cash = float(os.environ.get("ATLAS_STARTING_CASH", "100000"))
+        if starting_cash <= 0:
+            raise ValueError("ATLAS_STARTING_CASH must be positive.")
+        return cls(
+            trading_mode=mode,
+            starting_cash=starting_cash,
+            live_broker_connected=False,
+        )
