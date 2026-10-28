@@ -25,16 +25,19 @@ from atlas.contracts import (
     StatementRecord,
     StreamEvent,
     TimeIndex,
+    XbrlFactRecord,
 )
 from atlas.ingest.codec import (
     bar_to_row,
     build_stream,
     dumps_canonical,
     ensemble_to_row,
+    fact_to_row,
     filing_to_row,
     news_to_row,
     parse_bar,
     parse_ensemble,
+    parse_fact,
     parse_filing,
     parse_news,
     parse_prediction,
@@ -78,6 +81,7 @@ class SnapshotPayload:
     research: tuple[ResearchArtifact, ...] = ()
     predictions: tuple[ReturnPrediction, ...] = ()
     ensembles: tuple[EnsemblePrediction, ...] = ()
+    facts: tuple[XbrlFactRecord, ...] = ()
     vendor_raw: tuple[dict[str, Any], ...] = ()
 
 
@@ -137,6 +141,7 @@ class SnapshotSource:
         self._research = payload.research
         self._predictions = payload.predictions
         self._ensembles = payload.ensembles
+        self._facts = payload.facts
         self._vendor_raw = payload.vendor_raw
         self._by_ref = {bar.ref_id: bar for bar in self._bars}
         self._events = build_stream(
@@ -147,6 +152,7 @@ class SnapshotSource:
             self._research,
             self._predictions,
             self._ensembles,
+            self._facts,
         )
 
     def bars(self, symbol: str) -> Sequence[MarketBarRecord]:
@@ -173,6 +179,9 @@ class SnapshotSource:
 
     def ensembles(self) -> tuple[EnsemblePrediction, ...]:
         return self._ensembles
+
+    def facts(self) -> tuple[XbrlFactRecord, ...]:
+        return self._facts
 
     def vendor_raw(self) -> tuple[dict[str, Any], ...]:
         return self._vendor_raw
@@ -271,6 +280,7 @@ class SnapshotStore:
             research=source.research(),
             predictions=source.predictions(),
             ensembles=source.ensembles(),
+            facts=source.facts(),
         )
         return self.create(
             dataset_id or source.provenance.dataset_id,
@@ -342,6 +352,7 @@ def _stamp_payload(payload: SnapshotPayload, ingested: datetime) -> SnapshotPayl
     ensembles = tuple(
         replace(item, time=_stamp_time(item.time, ingested)) for item in payload.ensembles
     )
+    facts = tuple(replace(item, time=_stamp_time(item.time, ingested)) for item in payload.facts)
     return SnapshotPayload(
         bars=bars,
         filings=filings,
@@ -350,6 +361,7 @@ def _stamp_payload(payload: SnapshotPayload, ingested: datetime) -> SnapshotPayl
         research=research,
         predictions=predictions,
         ensembles=ensembles,
+        facts=facts,
         vendor_raw=payload.vendor_raw,
     )
 
@@ -392,7 +404,11 @@ def _write_payload(
     write_json_dir(
         "statements",
         payload.statements,
-        lambda item: f"{item.symbol}-{item.time.event_time.strftime('%Y%m%d')}",
+        lambda item: (
+            f"{item.symbol}-{item.time.event_time.strftime('%Y%m%d')}-{item.accession}"
+            if item.accession
+            else f"{item.symbol}-{item.time.event_time.strftime('%Y%m%d')}"
+        ),
         statement_to_row,
     )
     write_json_dir("research", payload.research, lambda item: item.artifact_id, research_to_row)
@@ -400,6 +416,14 @@ def _write_payload(
         "predictions", payload.predictions, lambda item: item.prediction_id, prediction_to_row
     )
     write_json_dir("ensembles", payload.ensembles, lambda item: item.ensemble_id, ensemble_to_row)
+    by_fact_symbol: dict[str, list[XbrlFactRecord]] = {}
+    for fact in payload.facts:
+        by_fact_symbol.setdefault(fact.symbol, []).append(fact)
+    if by_fact_symbol:
+        (root / "facts").mkdir()
+        for symbol, rows in sorted(by_fact_symbol.items()):
+            rel = f"facts/{symbol}.jsonl"
+            files[rel] = _write_jsonl(root / rel, [fact_to_row(item) for item in rows])
     if payload.vendor_raw:
         (root / "vendor").mkdir()
         rel = "vendor/raw_bars.jsonl"
@@ -413,6 +437,7 @@ def _write_payload(
         "research": len(payload.research),
         "predictions": len(payload.predictions),
         "ensembles": len(payload.ensembles),
+        "facts": len(payload.facts),
         "vendor_raw": len(payload.vendor_raw),
     }
     symbols = tuple(sorted({bar.symbol for bar in payload.bars}))
@@ -534,6 +559,7 @@ def _read_payload(path: Path, manifest: SnapshotManifest) -> SnapshotPayload:
     research: list[ResearchArtifact] = []
     predictions: list[ReturnPrediction] = []
     ensembles: list[EnsemblePrediction] = []
+    facts: list[XbrlFactRecord] = []
     vendor_raw: list[dict[str, Any]] = []
     parsers = {
         "bars": lambda file_path: bars.extend(
@@ -557,6 +583,9 @@ def _read_payload(path: Path, manifest: SnapshotManifest) -> SnapshotPayload:
         "ensembles": lambda file_path: ensembles.append(
             parse_ensemble(_load_json(file_path), provenance, require_ingested=True)
         ),
+        "facts": lambda file_path: facts.extend(
+            parse_fact(row, provenance, require_ingested=True) for row in _load_jsonl(file_path)
+        ),
         "vendor": lambda file_path: vendor_raw.extend(_load_jsonl(file_path)),
     }
     for rel in sorted(manifest.files):
@@ -573,5 +602,6 @@ def _read_payload(path: Path, manifest: SnapshotManifest) -> SnapshotPayload:
         research=tuple(research),
         predictions=tuple(predictions),
         ensembles=tuple(ensembles),
+        facts=tuple(facts),
         vendor_raw=tuple(vendor_raw),
     )

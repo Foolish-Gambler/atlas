@@ -8,6 +8,12 @@ from atlas.ingest.alpaca import (
     MissingCredentialsError,
     adapter_for_tests,
 )
+from atlas.ingest.edgar import (
+    EdgarAdapter,
+    EdgarIngestResult,
+    EdgarQuery,
+    MissingEdgarUserAgentError,
+)
 from atlas.ingest.http import NetworkDisabledError, ReadOnlyHttpError
 from atlas.ingest.local import LocalFixtureSource
 from atlas.ingest.snapshot import (
@@ -29,6 +35,10 @@ __all__ = [
     "AlpacaBarsAdapter",
     "AlpacaIngestResult",
     "MissingCredentialsError",
+    "EdgarAdapter",
+    "EdgarIngestResult",
+    "EdgarQuery",
+    "MissingEdgarUserAgentError",
     "NetworkDisabledError",
     "ReadOnlyHttpError",
     "adapter_for_tests",

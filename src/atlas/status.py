@@ -62,7 +62,7 @@ def collect_status(settings: AtlasSettings | None = None) -> SystemStatus:
         ModuleStatus("fundamentals", True, "caller-supplied statements"),
         ModuleStatus("forecasting", True, "signals require risk approval"),
         ModuleStatus("risk", True, "deterministic pre-trade checks"),
-        ModuleStatus("ingest", True, "snapshots local; vendor GET off by default"),
+        ModuleStatus("ingest", True, "snapshots local; Alpaca/EDGAR GET off by default"),
         ModuleStatus("backtesting", True, "PIT replay of provided bars"),
         ModuleStatus("paper_trading", True, "in-memory simulated broker"),
     )

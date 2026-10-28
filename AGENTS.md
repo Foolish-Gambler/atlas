@@ -17,7 +17,7 @@ Source lives under `src/atlas` (src layout). Tests live under `tests/`.
 | Fundamental analysis | `atlas.fundamentals` | Ratios and scores from **provided** statements. Do not invent filings. |
 | Forecasting | `atlas.forecasting` | Candidate signals only. Forecasts never execute trades. |
 | Risk management | `atlas.risk` | Deterministic gates every signal must pass before paper execution. |
-| Ingest | `atlas.ingest` | Local fixtures, immutable snapshots, and a read-only Alpaca bars adapter. Network is off unless `ATLAS_ALLOW_NETWORK` is granted. |
+| Ingest | `atlas.ingest` | Local fixtures, immutable snapshots, read-only Alpaca bars, and read-only SEC EDGAR filings/companyfacts. Network is off unless `ATLAS_ALLOW_NETWORK` is granted. |
 | Backtesting | `atlas.backtesting` | Research path is `PitBacktestEngine` (decide on published close, fill a later session open). Legacy `BacktestEngine` has look-ahead bias and must not be used for research. |
 | Paper trading | `atlas.paper_trading` | In-memory simulated broker. The only allowed execution mode. |
 | CLI / status | `atlas.cli`, `atlas.status` | Operator interface. `atlas status` reports mode, modules, and live-broker isolation. |

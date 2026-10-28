@@ -37,6 +37,7 @@ class StreamEventType(StrEnum):
     NEWS = "news"
     FILING = "filing"
     STATEMENT = "statement"
+    XBRL_FACT = "xbrl_fact"
     MACRO = "macro"
     RESEARCH = "research"
     PREDICTION = "prediction"
@@ -211,11 +212,24 @@ class FilingRecord:
     time: TimeIndex
     provenance: Provenance
     accession: str
+    cik: str | None = None
+    primary_document: str | None = None
+    items: tuple[str, ...] = ()
+    is_amendment: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "symbol", normalize_symbol(self.symbol))
         if not self.form_type.strip() or not self.accession.strip():
             raise InvalidInputError("form_type and accession are required.")
+        object.__setattr__(self, "items", tuple(self.items))
+        if self.cik == "":
+            object.__setattr__(self, "cik", None)
+        if self.primary_document == "":
+            object.__setattr__(self, "primary_document", None)
+
+    @property
+    def ref_id(self) -> str:
+        return f"filing:{self.accession}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -238,6 +252,10 @@ class StatementRecord:
     provenance: Provenance
     earnings_per_share: float
     book_value_per_share: float
+    metrics: tuple[tuple[str, float], ...] = ()
+    cik: str | None = None
+    accession: str | None = None
+    form_type: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "symbol", normalize_symbol(self.symbol))
@@ -251,6 +269,46 @@ class StatementRecord:
             "book_value_per_share",
             require_finite(self.book_value_per_share, "book_value_per_share"),
         )
+        cleaned: list[tuple[str, float]] = []
+        for name, value in self.metrics:
+            if not str(name).strip():
+                raise InvalidInputError("metric names are required.")
+            cleaned.append((str(name), require_finite(value, name)))
+        object.__setattr__(self, "metrics", tuple(cleaned))
+        if self.cik == "":
+            object.__setattr__(self, "cik", None)
+        if self.accession == "":
+            object.__setattr__(self, "accession", None)
+
+
+@dataclass(frozen=True, slots=True)
+class XbrlFactRecord:
+    """One SEC companyfacts observation. Restatements are additional rows, never overwrites."""
+
+    symbol: str
+    cik: str
+    concept: str
+    taxonomy: str
+    unit: str
+    value: float
+    time: TimeIndex
+    provenance: Provenance
+    accession: str
+    form_type: str | None = None
+    fiscal_year: int | None = None
+    fiscal_period: str | None = None
+    frame: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "symbol", normalize_symbol(self.symbol))
+        if not self.cik.strip() or not self.concept.strip() or not self.accession.strip():
+            raise InvalidInputError("cik, concept, and accession are required.")
+        object.__setattr__(self, "value", require_finite(self.value, "value"))
+
+    @property
+    def ref_id(self) -> str:
+        end = self.time.event_time.date().isoformat()
+        return f"fact:{self.symbol}:{self.concept}:{end}:{self.accession}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -396,6 +454,8 @@ class PitReplaySource(Protocol):
 
     def statements(self) -> tuple[StatementRecord, ...]: ...
 
+    def facts(self) -> tuple[XbrlFactRecord, ...]: ...
+
     def research(self) -> tuple[ResearchArtifact, ...]: ...
 
     def predictions(self) -> tuple[ReturnPrediction, ...]: ...
@@ -409,6 +469,7 @@ _EVENT_RANK = {
     StreamEventType.NEWS: 2,
     StreamEventType.FILING: 3,
     StreamEventType.STATEMENT: 4,
+    StreamEventType.XBRL_FACT: 4,
     StreamEventType.MACRO: 5,
     StreamEventType.RESEARCH: 6,
     StreamEventType.PREDICTION: 7,

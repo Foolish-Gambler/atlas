@@ -66,6 +66,27 @@ def build_parser() -> argparse.ArgumentParser:
     fetch.add_argument("--max-pages", type=int, default=20)
     fetch.add_argument("--max-records", type=int, default=50_000)
 
+    edgar = subparsers.add_parser(
+        "edgar", help="Read-only SEC EDGAR ingest (mocked unless granted)."
+    )
+    edgar_sub = edgar.add_subparsers(dest="edgar_command", required=True)
+    edgar_ingest = edgar_sub.add_parser(
+        "ingest-recorded",
+        help="Ingest recorded SEC JSON pages. Does not open a network socket.",
+    )
+    _add_snapshot_ids(edgar_ingest, require_ids=True)
+    edgar_ingest.add_argument("--recorded", required=True, type=Path)
+    edgar_ingest.add_argument("--symbol", default="AAPL")
+    edgar_fetch = edgar_sub.add_parser(
+        "fetch-once",
+        help="One-off read-only SEC GET. Requires ATLAS_ALLOW_NETWORK. Never called in CI.",
+    )
+    _add_snapshot_ids(edgar_fetch, require_ids=True)
+    edgar_fetch.add_argument("--symbol", default="AAPL")
+    edgar_fetch.add_argument("--max-filings", type=int, default=40)
+    edgar_fetch.add_argument("--max-facts", type=int, default=2000)
+    edgar_fetch.add_argument("--max-requests", type=int, default=8)
+
     paper = subparsers.add_parser("paper", help="Paper-only virtual portfolio helpers.")
     paper_sub = paper.add_subparsers(dest="paper_command", required=True)
     demo = paper_sub.add_parser("demo", help="Replay a snapshot with $10,000 virtual cash.")
@@ -93,6 +114,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "alpaca":
         try:
             return _alpaca_command(args)
+        except NetworkDisabledError as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
+    if args.command == "edgar":
+        try:
+            return _edgar_command(args)
         except NetworkDisabledError as exc:
             print(str(exc), file=sys.stderr)
             return 2
@@ -252,6 +279,97 @@ def _alpaca_command(args: argparse.Namespace) -> int:
                 "revision": result.manifest.revision,
                 "execution_eligible": result.execution_eligible,
                 "missing_sessions": list(result.missing_sessions),
+                "retrieval_mode": result.retrieval_mode,
+                "authenticated_vendor_data": result.authenticated_vendor_data,
+                "simulated": result.simulated,
+                "mocked_http": result.retrieval_mode == RETRIEVAL_MOCKED_HTTP,
+            },
+            indent=2,
+        )
+    )
+    return 0
+
+
+def _edgar_command(args: argparse.Namespace) -> int:
+    import httpx
+
+    from atlas.ingest.edgar import (
+        RETRIEVAL_MOCKED_HTTP,
+        RETRIEVAL_VENDOR_GET,
+        EdgarAdapter,
+        EdgarQuery,
+        adapter_for_tests,
+    )
+    from atlas.ingest.http import network_allowed
+
+    if args.edgar_command == "fetch-once":
+        if not network_allowed():
+            raise NetworkDisabledError(
+                "atlas edgar fetch-once requires ATLAS_ALLOW_NETWORK=1 after explicit approval."
+            )
+        query = EdgarQuery(
+            symbol=args.symbol,
+            max_filings=args.max_filings,
+            max_facts=args.max_facts,
+            max_requests=args.max_requests,
+        )
+        result = EdgarAdapter().ingest(
+            SnapshotStore(args.root),
+            dataset_id=args.dataset,
+            revision=args.revision,
+            query=query,
+            retrieval_mode=RETRIEVAL_VENDOR_GET,
+        )
+        print(
+            json.dumps(
+                {
+                    "status": "created",
+                    "dataset_id": result.manifest.dataset_id,
+                    "revision": result.manifest.revision,
+                    "cik": result.cik,
+                    "filings": len(result.filings),
+                    "facts": len(result.facts),
+                    "retrieval_mode": result.retrieval_mode,
+                    "authenticated_vendor_data": result.authenticated_vendor_data,
+                    "mocked_http": False,
+                    "simulated": False,
+                },
+                indent=2,
+            )
+        )
+        return 0
+    if args.edgar_command != "ingest-recorded":
+        return 1
+    recorded = json.loads(Path(args.recorded).read_text(encoding="utf-8"))
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method != "GET":
+            return httpx.Response(405, json={"error": "GET only"})
+        path = request.url.path
+        if path.endswith("company_tickers.json"):
+            body = recorded.get("tickers", recorded)
+            return httpx.Response(200, json=body)
+        if "/submissions/" in path:
+            return httpx.Response(200, json=recorded["submissions"])
+        if "/companyfacts/" in path:
+            return httpx.Response(200, json=recorded["companyfacts"])
+        return httpx.Response(404, json={"error": path})
+
+    result = adapter_for_tests(handler).ingest(
+        SnapshotStore(args.root),
+        dataset_id=args.dataset,
+        revision=args.revision,
+        query=EdgarQuery(symbol=args.symbol),
+    )
+    print(
+        json.dumps(
+            {
+                "status": "created",
+                "dataset_id": result.manifest.dataset_id,
+                "revision": result.manifest.revision,
+                "cik": result.cik,
+                "filings": len(result.filings),
+                "facts": len(result.facts),
                 "retrieval_mode": result.retrieval_mode,
                 "authenticated_vendor_data": result.authenticated_vendor_data,
                 "simulated": result.simulated,

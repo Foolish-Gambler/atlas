@@ -56,9 +56,13 @@
 
 `SnapshotStore`, `manifest.json`, SHA-256, 원자적 리비전 생성, `PitReplaySource`. 스키마: `docs/SNAPSHOT_SCHEMA.md`.
 
-### M2-B — 구현 중: Alpaca 과거 시세 (모킹 HTTP)
+### M2-B — 완료: Alpaca 과거 시세 (모킹 HTTP)
 
 `AlpacaBarsAdapter`, NYSE RTH 캘린더, `$10,000` 페이퍼 데모. 실제 `data.alpaca.markets` 호출은 `ATLAS_ALLOW_NETWORK`와 사람 승인이 필요하다.
+
+### M2-C — 구현: SEC EDGAR 공시·제표 (모킹 HTTP)
+
+`EdgarAdapter`: ticker→CIK, 10-K/10-Q/8-K, XBRL companyfacts. `available_time`은 EDGAR acceptance. 실제 `data.sec.gov` GET은 `ATLAS_ALLOW_NETWORK`와 `ATLAS_EDGAR_USER_AGENT`가 필요하다.
 
 사람 승인 후에만 HTTP를 연다. 이후 요지:
 

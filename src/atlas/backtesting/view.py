@@ -16,7 +16,9 @@ from atlas.contracts import (
     ReturnPrediction,
     StatementRecord,
     StreamEvent,
+    XbrlFactRecord,
 )
+from atlas.ingest.codec import statement_event_id
 from atlas.validation import normalize_symbol, require_aware_datetime
 
 
@@ -33,6 +35,7 @@ class MarketView:
     research: tuple[ResearchArtifact, ...]
     predictions: tuple[ReturnPrediction, ...]
     ensembles: tuple[EnsemblePrediction, ...]
+    facts: tuple[XbrlFactRecord, ...] = ()
 
     def last_bar(self, symbol: str | None = None) -> MarketBarRecord | None:
         rows = self.bars
@@ -79,8 +82,12 @@ def build_view(
         statements=tuple(
             statement
             for statement in source.statements()
-            if f"statement:{statement.symbol}:{statement.time.event_time.isoformat()}"
-            in visible_ids
+            if statement_event_id(statement) in visible_ids
+        ),
+        facts=tuple(
+            fact
+            for fact in source.facts()
+            if fact.ref_id in visible_ids and fact.time.available_time <= as_of
         ),
         research=tuple(
             artifact

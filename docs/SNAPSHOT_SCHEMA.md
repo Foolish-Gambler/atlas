@@ -14,6 +14,8 @@ Immutable financial datasets live on local disk. HTTP, credentials, and live bro
   research/{artifact_id}.json
   predictions/{prediction_id}.json
   ensembles/{ensemble_id}.json
+  facts/{SYMBOL}.jsonl
+  vendor/raw_bars.jsonl
 ```
 
 - `dataset_id` and `revision` are explicit path-safe identifiers. There is no `latest` alias.

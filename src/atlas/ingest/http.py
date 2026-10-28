@@ -10,6 +10,9 @@ from urllib.parse import urlparse
 import httpx
 
 ALPACA_DATA_HOST = "data.alpaca.markets"
+SEC_WWW_HOST = "www.sec.gov"
+SEC_DATA_HOST = "data.sec.gov"
+SEC_ALLOWED_HOSTS = frozenset({SEC_WWW_HOST, SEC_DATA_HOST})
 _BLOCKED_HOSTS = frozenset({"api.alpaca.markets", "paper-api.alpaca.markets"})
 
 
@@ -31,15 +34,23 @@ class ReadOnlyHttp:
     def __init__(
         self,
         *,
-        allowed_host: str,
+        allowed_host: str | None = None,
+        allowed_hosts: frozenset[str] | None = None,
         timeout_seconds: float = 30.0,
         max_retries: int = 3,
         rate_limit_sleep: float = 0.2,
         client: httpx.Client | None = None,
         allow_network: bool | None = None,
         sleeper: Any = None,
+        user_agent: str | None = None,
     ) -> None:
-        self.allowed_host = allowed_host
+        hosts = set(allowed_hosts or ())
+        if allowed_host:
+            hosts.add(allowed_host)
+        if not hosts:
+            raise ValueError("allowed_host or allowed_hosts is required.")
+        self.allowed_hosts = frozenset(hosts)
+        self.allowed_host = allowed_host or sorted(hosts)[0]
         self.timeout_seconds = timeout_seconds
         self.max_retries = max_retries
         self.rate_limit_sleep = rate_limit_sleep
@@ -50,10 +61,11 @@ class ReadOnlyHttp:
                 "Vendor HTTP is disabled. Set ATLAS_ALLOW_NETWORK=1 only after explicit approval."
             )
         self._owns_client = client is None
+        headers = {"User-Agent": user_agent or "ATLAS-read-only/0.1"}
         self._client = client or httpx.Client(
             timeout=timeout_seconds,
             follow_redirects=False,
-            headers={"User-Agent": "ATLAS-read-only/0.1"},
+            headers=headers,
         )
 
     def close(self) -> None:
@@ -72,7 +84,7 @@ class ReadOnlyHttp:
         path = parsed.path.lower()
         if host in _BLOCKED_HOSTS or "/orders" in path or "/v2/account" in path:
             raise ReadOnlyHttpError("trading and account endpoints are forbidden.")
-        if parsed.scheme != "https" or host != self.allowed_host:
+        if parsed.scheme != "https" or host not in self.allowed_hosts:
             raise ReadOnlyHttpError(f"GET host {host!r} is not allowed.")
         last_error: Exception | None = None
         for attempt in range(self.max_retries):

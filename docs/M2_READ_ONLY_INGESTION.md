@@ -156,7 +156,7 @@ A `NetworkGuard` flag defaults to **off** (`ATLAS_ALLOW_NETWORK` unset). Product
 
 1. Snapshot store + manifest (local disk, no HTTP). **M2-A implemented** (`SnapshotStore`, `docs/SNAPSHOT_SCHEMA.md`).
 2. Alpaca historical bars behind mocks (**M2-B implemented**). Approved one-off live GET still requires `ATLAS_ALLOW_NETWORK`.
-3. EDGAR filings/statements behind mocks, then approved one-off fetch.
+3. EDGAR filings/statements behind mocks (**M2-C implemented**). Approved one-off live GET still requires `ATLAS_ALLOW_NETWORK` and `ATLAS_EDGAR_USER_AGENT`.
 4. Wire snapshots into `LocalFixtureSource` or a thin `SnapshotSource`.
 5. Stop. LLM agents and ML training wait for M3/M4.
 

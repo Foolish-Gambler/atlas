@@ -19,6 +19,7 @@ from atlas.contracts import (
     StreamEvent,
     StreamEventType,
     TimeIndex,
+    XbrlFactRecord,
 )
 from atlas.validation import InvalidInputError
 
@@ -141,6 +142,10 @@ def filing_to_row(record: FilingRecord) -> dict[str, Any]:
         "symbol": record.symbol,
         "form_type": record.form_type,
         "accession": record.accession,
+        "cik": record.cik,
+        "primary_document": record.primary_document,
+        "items": list(record.items),
+        "is_amendment": record.is_amendment,
         **time_to_row(record.time),
     }
 
@@ -154,6 +159,10 @@ def parse_filing(
         time=require_time_index(row, require_ingested=require_ingested),
         provenance=provenance,
         accession=row["accession"],
+        cik=row.get("cik"),
+        primary_document=row.get("primary_document"),
+        items=tuple(row.get("items") or ()),
+        is_amendment=bool(row.get("is_amendment", False)),
     )
 
 
@@ -178,6 +187,10 @@ def statement_to_row(record: StatementRecord) -> dict[str, Any]:
         "earnings_per_share": record.earnings_per_share,
         "book_value_per_share": record.book_value_per_share,
         "period_end": record.time.event_time.isoformat(),
+        "metrics": [[name, value] for name, value in record.metrics],
+        "cik": record.cik,
+        "accession": record.accession,
+        "form_type": record.form_type,
         **time_to_row(record.time),
     }
 
@@ -191,7 +204,57 @@ def parse_statement(
         provenance=provenance,
         earnings_per_share=row["earnings_per_share"],
         book_value_per_share=row["book_value_per_share"],
+        metrics=tuple((str(name), float(value)) for name, value in (row.get("metrics") or ())),
+        cik=row.get("cik"),
+        accession=row.get("accession"),
+        form_type=row.get("form_type"),
     )
+
+
+def fact_to_row(record: XbrlFactRecord) -> dict[str, Any]:
+    return {
+        "symbol": record.symbol,
+        "cik": record.cik,
+        "concept": record.concept,
+        "taxonomy": record.taxonomy,
+        "unit": record.unit,
+        "value": record.value,
+        "accession": record.accession,
+        "form_type": record.form_type,
+        "fiscal_year": record.fiscal_year,
+        "fiscal_period": record.fiscal_period,
+        "frame": record.frame,
+        **time_to_row(record.time),
+    }
+
+
+def parse_fact(
+    row: dict[str, Any], provenance: Provenance, *, require_ingested: bool
+) -> XbrlFactRecord:
+    return XbrlFactRecord(
+        symbol=row["symbol"],
+        cik=row["cik"],
+        concept=row["concept"],
+        taxonomy=row["taxonomy"],
+        unit=row["unit"],
+        value=row["value"],
+        time=require_time_index(row, require_ingested=require_ingested),
+        provenance=provenance,
+        accession=row["accession"],
+        form_type=row.get("form_type"),
+        fiscal_year=row.get("fiscal_year"),
+        fiscal_period=row.get("fiscal_period"),
+        frame=row.get("frame"),
+    )
+
+
+def statement_event_id(statement: StatementRecord) -> str:
+    if statement.accession:
+        return (
+            f"statement:{statement.symbol}:{statement.time.event_time.isoformat()}:"
+            f"{statement.accession}"
+        )
+    return f"statement:{statement.symbol}:{statement.time.event_time.isoformat()}"
 
 
 def research_to_row(record: ResearchArtifact) -> dict[str, Any]:
@@ -290,6 +353,7 @@ def build_stream(
     research: Sequence[ResearchArtifact],
     predictions: Sequence[ReturnPrediction],
     ensembles: Sequence[EnsemblePrediction],
+    facts: Sequence[XbrlFactRecord] = (),
 ) -> tuple[StreamEvent, ...]:
     events: list[StreamEvent] = []
     for bar in bars:
@@ -306,8 +370,10 @@ def build_stream(
         event_id = f"news:{item.symbol}:{item.time.event_time.isoformat()}"
         events.append(StreamEvent(event_id, StreamEventType.NEWS, item.time, event_id))
     for statement in statements:
-        event_id = f"statement:{statement.symbol}:{statement.time.event_time.isoformat()}"
+        event_id = statement_event_id(statement)
         events.append(StreamEvent(event_id, StreamEventType.STATEMENT, statement.time, event_id))
+    for fact in facts:
+        events.append(StreamEvent(fact.ref_id, StreamEventType.XBRL_FACT, fact.time, fact.ref_id))
     for artifact in research:
         events.append(
             StreamEvent(

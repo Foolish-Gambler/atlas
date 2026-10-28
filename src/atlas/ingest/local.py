@@ -20,11 +20,13 @@ from atlas.contracts import (
     SourceKind,
     StatementRecord,
     StreamEvent,
+    XbrlFactRecord,
 )
 from atlas.ingest.codec import (
     build_stream,
     parse_bar,
     parse_ensemble,
+    parse_fact,
     parse_filing,
     parse_news,
     parse_prediction,
@@ -64,6 +66,7 @@ class LocalFixtureSource(ReadOnlyBarSource, ReadOnlyEventSource):
         self._ensembles = tuple(
             _parse_many(payload.get("ensembles", []), parse_ensemble, self.provenance)
         )
+        self._facts = tuple(_parse_many(payload.get("facts", []), parse_fact, self.provenance))
         self._by_ref = {bar.ref_id: bar for bar in self._bars}
         self._events = build_stream(
             self._bars,
@@ -73,6 +76,7 @@ class LocalFixtureSource(ReadOnlyBarSource, ReadOnlyEventSource):
             self._research,
             self._predictions,
             self._ensembles,
+            self._facts,
         )
 
     def bars(self, symbol: str) -> Sequence[MarketBarRecord]:
@@ -99,6 +103,9 @@ class LocalFixtureSource(ReadOnlyBarSource, ReadOnlyEventSource):
 
     def ensembles(self) -> tuple[EnsemblePrediction, ...]:
         return self._ensembles
+
+    def facts(self) -> tuple[XbrlFactRecord, ...]:
+        return self._facts
 
     def stream(self) -> Sequence[StreamEvent]:
         return self._events

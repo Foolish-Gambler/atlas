@@ -8,6 +8,7 @@ import pytest
 from atlas.cli import main
 
 ALPACA_MIN = Path(__file__).parent / "fixtures" / "ingest" / "alpaca" / "aapl_1min_pages.json"
+EDGAR_PAGES = Path(__file__).parent / "fixtures" / "ingest" / "edgar" / "aapl_pages.json"
 
 FIXTURE = Path(__file__).parent / "fixtures" / "pit" / "m1_sim_a.json"
 
@@ -217,3 +218,50 @@ def test_fetch_once_uses_readonly_http_without_opening_a_socket(
             ]
         )
     assert not (root / "live-blocked" / "once").exists()
+
+
+def test_edgar_recorded_ingest_and_fetch_once_blocked(tmp_path: Path, capsys, monkeypatch) -> None:
+    monkeypatch.setenv("ATLAS_EDGAR_USER_AGENT", "ATLAS tests contact@example.com")
+    root = tmp_path / "snapshots"
+    assert (
+        main(
+            [
+                "edgar",
+                "ingest-recorded",
+                "--root",
+                str(root),
+                "--dataset",
+                "edgar-aapl",
+                "--revision",
+                "cli-mock",
+                "--recorded",
+                str(EDGAR_PAGES),
+                "--symbol",
+                "AAPL",
+            ]
+        )
+        == 0
+    )
+    created = json.loads(capsys.readouterr().out)
+    assert created["mocked_http"] is True
+    assert created["cik"] == "0000320193"
+    assert created["filings"] >= 3
+    assert "contact@example.com" not in json.dumps(created)
+    monkeypatch.delenv("ATLAS_ALLOW_NETWORK", raising=False)
+    assert (
+        main(
+            [
+                "edgar",
+                "fetch-once",
+                "--root",
+                str(root),
+                "--dataset",
+                "edgar-should-not-run",
+                "--revision",
+                "blocked",
+                "--symbol",
+                "AAPL",
+            ]
+        )
+        == 2
+    )
