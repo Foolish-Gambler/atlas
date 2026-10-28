@@ -8,9 +8,9 @@
 
 남은 정리: 제품 비전 문서, 안정 데이터 계약 (`atlas.contracts`), 이벤트 시계의 **설계·타입** (본 작업).
 
-## 마일스톤 1 — 구현 중 (PIT 백테스트 + 로컬 픽스처)
+## 마일스톤 1 — 완료 (PIT 백테스트 + 로컬 픽스처)
 
-코드: `PitBacktestEngine`, `LocalFixtureSource`, `EventClock` 뷰, JSONL 저널. 기존 `BacktestEngine`은 룩어헤드가 있으므로 레거시로 유지한다.
+코드: `PitBacktestEngine`, `LocalFixtureSource`, `EventClock` 뷰, JSONL 저널. 기존 `BacktestEngine`은 동일 봉 종가로 시그널과 체결을 맞추므로 **연구 백테스트에 사용하면 안 된다** (`LookaheadBiasWarning`).
 
 **목표:** 포인트-인-타임 이벤트 시계와 **읽기 전용** 로컬 적재. 네트워크 벤더와 LLM은 아직 없다.
 
@@ -50,14 +50,14 @@
 - pandas 대량 도입이 꼭 필요하지 않으면 표준 라이브러리 유지
 - 기존 `PaperBroker` 재작성
 
-## 마일스톤 2 — 읽기 전용 실데이터 (승인 후)
+## 마일스톤 2 — 읽기 전용 실데이터 (설계: `docs/M2_READ_ONLY_INGESTION.md`)
 
-사람 승인 후에만:
+사람 승인 후에만 HTTP를 연다. 설계 요지:
 
-- 시세·공시 벤더의 **GET 전용** 어댑터 (`SourceKind.VENDOR_READ_ONLY`).
-- 시크릿은 환경 변수, 로그에 키 금지.
-- 적재 데이터를 `dataset_id` + `revision`으로 고정해 백테스트가 같은 스냅샷을 재현.
-- 실패 시 재시도·레이트 리밋. 쓰기는 없음.
+- SEC EDGAR 공시·제표와 Alpaca **과거 시세**의 GET 전용 어댑터 (`SourceKind.VENDOR_READ_ONLY`).
+- `TimeIndex` + provenance, `dataset_id`/`revision` 스냅샷, 오프라인 픽스처·모킹 HTTP 테스트.
+- 자격 증명은 환경 변수만, 로그 금지. 레이트 리밋. 쓰기는 없음.
+- 페이퍼 전용 유지. LLM 에이전트와 정량 ML은 이후 마일스톤의 소비자.
 
 ## 마일스톤 3 — 리서치 에이전트
 

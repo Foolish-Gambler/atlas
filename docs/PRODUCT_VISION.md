@@ -31,7 +31,7 @@ ATLAS는 **자율형 AI 주식 투자 리서치·매매 시스템**이다. 최�
 | 정량 ML | 없음 | `forecasting`은 휴리스틱 블렌드 | 피처, 학습, 불확실성 교정 |
 | 다중 모델 결합 | 없음 | — | `EnsemblePrediction` 계약만 정의 |
 | 포트폴리오 최적화 | 없음 | 주문 단위 수량 한도만 존재 | 가중치, 회전율, 노출 한도 |
-| 이벤트 기반 PIT 백테스트 | 부분 | `BacktestEngine`이 바를 순서대로 BUY | 룩어헤드, 다음 봉 체결, 멀티 심볼 시계 |
+| 이벤트 기반 PIT 백테스트 | M1 구현 | `PitBacktestEngine` (시가/종가/가용 시각 분리) | 멀티 심볼 스케줄. 레거시 `BacktestEngine`은 룩어헤드로 연구 금지 |
 | 페이퍼 자동 집행 | 구현 | `PaperBroker` + `RiskManager` | 세션 영속화, 재시작 후 decision 레지스트리 |
 | 감사·성과 기록 | 부분 | `PaperFill`, `decision_id` | 근거 그래프, 모델 버전, 예측 오차 저널 |
 | 실거래 | 의도적 부재 | `safety`가 LIVE 거부 | 추가하지 않음 |

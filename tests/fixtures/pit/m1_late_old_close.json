@@ -1,0 +1,40 @@
+{
+  "dataset_id": "m1-late-old-close",
+  "revision": "1",
+  "source_kind": "simulated",
+  "bars": [
+    {
+      "symbol": "SIM-A",
+      "open_time": "2024-01-01T14:30:00+00:00",
+      "close_time": "2024-01-01T21:00:00+00:00",
+      "available_time": "2024-01-04T22:00:00+00:00",
+      "open": 9.0,
+      "high": 11.0,
+      "low": 8.0,
+      "close": 10.0,
+      "volume": 800
+    },
+    {
+      "symbol": "SIM-A",
+      "open_time": "2024-01-02T14:30:00+00:00",
+      "close_time": "2024-01-02T21:00:00+00:00",
+      "available_time": "2024-01-02T21:00:00+00:00",
+      "open": 100.0,
+      "high": 101.0,
+      "low": 99.0,
+      "close": 100.0,
+      "volume": 1000
+    },
+    {
+      "symbol": "SIM-A",
+      "open_time": "2024-01-03T14:30:00+00:00",
+      "close_time": "2024-01-03T21:00:00+00:00",
+      "available_time": "2024-01-03T21:00:00+00:00",
+      "open": 102.0,
+      "high": 121.0,
+      "low": 101.0,
+      "close": 120.0,
+      "volume": 1100
+    }
+  ]
+}

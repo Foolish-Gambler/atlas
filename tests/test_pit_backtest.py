@@ -24,6 +24,7 @@ DELAYED = FIXTURE_DIR / "m1_delayed.json"
 MIXED = FIXTURE_DIR / "m1_mixed_symbols.json"
 WEEKEND = FIXTURE_DIR / "m1_weekend.json"
 DST = FIXTURE_DIR / "m1_dst.json"
+LATE_OLD_CLOSE = FIXTURE_DIR / "m1_late_old_close.json"
 
 
 class SpyStrategy:
@@ -180,6 +181,22 @@ def test_dst_transition_uses_eastern_open(settings: AtlasSettings) -> None:
     assert len(fills) == 1
     assert fills[0]["fill_price"] == 108.0
     assert datetime.fromisoformat(fills[0]["execution_time"]) == monday_open
+
+
+def test_late_older_close_does_not_overwrite_valuation(settings: AtlasSettings) -> None:
+    source = LocalFixtureSource(LATE_OLD_CLOSE)
+    result = PitBacktestEngine(settings=settings).run(
+        source, NextOpenBuyStrategy(quantity=1), run_id="late-old-close"
+    )
+    fills = [row for row in result.journal.records if row["type"] == "fill"]
+    assert len(fills) == 1
+    assert fills[0]["fill_price"] == 102.0
+    cash_after_fill = settings.starting_cash - 102.0
+    expected_equity = cash_after_fill + 120.0
+    assert result.ending_cash == cash_after_fill
+    assert result.ending_equity == expected_equity
+    assert result.equity_curve[-1] == expected_equity
+    assert result.ending_equity != cash_after_fill + 10.0
 
 
 def test_local_fixture_rejects_vendor_claim(tmp_path: Path) -> None:

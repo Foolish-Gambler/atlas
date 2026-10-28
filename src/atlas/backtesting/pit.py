@@ -1,4 +1,4 @@
-"""Point-in-time, event-driven paper backtest. Does not replace BacktestEngine."""
+"""Point-in-time, event-driven paper backtest. The research path; not BacktestEngine."""
 
 from __future__ import annotations
 
@@ -94,6 +94,7 @@ class PitBacktestEngine:
         rejected = 0
         cancelled = 0
         equity_curve: list[float] = []
+        last_close_time: dict[str, datetime] = {}
 
         for event in clock.events:
             if event.event_type is StreamEventType.BAR_OPEN:
@@ -111,7 +112,7 @@ class PitBacktestEngine:
                 continue
 
             bar = source.bar_by_ref(event.ref_id)
-            self._mark_close(broker, bar)
+            self._mark_close(broker, bar, last_close_time)
             as_of = bar.available_time
             view = build_view(source, clock.visible(as_of), as_of)
             self._assert_no_lookahead(view, as_of)
@@ -265,13 +266,22 @@ class PitBacktestEngine:
             }
         )
 
-    def _mark_close(self, broker: PaperBroker, bar: MarketBarRecord) -> None:
+    def _mark_close(
+        self,
+        broker: PaperBroker,
+        bar: MarketBarRecord,
+        last_close_time: dict[str, datetime],
+    ) -> None:
+        previous = last_close_time.get(bar.symbol)
+        if previous is not None and bar.close_time <= previous:
+            return
+        last_close_time[bar.symbol] = bar.close_time
         broker.update_marks(
             {
                 bar.symbol: PriceMark(
                     symbol=bar.symbol,
                     price=bar.close,
-                    as_of=bar.available_time,
+                    as_of=bar.close_time,
                     provenance=(
                         "simulated"
                         if bar.provenance.source_kind.value == "simulated"

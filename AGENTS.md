@@ -17,7 +17,7 @@ Source lives under `src/atlas` (src layout). Tests live under `tests/`.
 | Fundamental analysis | `atlas.fundamentals` | Ratios and scores from **provided** statements. Do not invent filings. |
 | Forecasting | `atlas.forecasting` | Candidate signals only. Forecasts never execute trades. |
 | Risk management | `atlas.risk` | Deterministic gates every signal must pass before paper execution. |
-| Backtesting | `atlas.backtesting` | Legacy bar replay plus `PitBacktestEngine` (decide on close, fill next open, PIT views). |
+| Backtesting | `atlas.backtesting` | Research path is `PitBacktestEngine` (decide on published close, fill a later session open). Legacy `BacktestEngine` has look-ahead bias and must not be used for research. |
 | Paper trading | `atlas.paper_trading` | In-memory simulated broker. The only allowed execution mode. |
 | CLI / status | `atlas.cli`, `atlas.status` | Operator interface. `atlas status` reports mode, modules, and live-broker isolation. |
 
