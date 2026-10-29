@@ -216,6 +216,9 @@ class FilingRecord:
     primary_document: str | None = None
     items: tuple[str, ...] = ()
     is_amendment: bool = False
+    raw_acceptance: str | None = None
+    acceptance_verified: bool = False
+    intraday_eligible: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "symbol", normalize_symbol(self.symbol))
@@ -226,6 +229,8 @@ class FilingRecord:
             object.__setattr__(self, "cik", None)
         if self.primary_document == "":
             object.__setattr__(self, "primary_document", None)
+        if self.raw_acceptance == "":
+            object.__setattr__(self, "raw_acceptance", None)
 
     @property
     def ref_id(self) -> str:
@@ -256,6 +261,8 @@ class StatementRecord:
     cik: str | None = None
     accession: str | None = None
     form_type: str | None = None
+    period_kind: str | None = None
+    period_start: datetime | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "symbol", normalize_symbol(self.symbol))
@@ -279,6 +286,10 @@ class StatementRecord:
             object.__setattr__(self, "cik", None)
         if self.accession == "":
             object.__setattr__(self, "accession", None)
+        if self.period_start is not None:
+            object.__setattr__(
+                self, "period_start", require_aware_datetime(self.period_start, "period_start")
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -298,17 +309,34 @@ class XbrlFactRecord:
     fiscal_year: int | None = None
     fiscal_period: str | None = None
     frame: str | None = None
+    period_start: datetime | None = None
+    period_kind: str = "instant"
+    raw_acceptance: str | None = None
+    acceptance_verified: bool = False
+    intraday_eligible: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "symbol", normalize_symbol(self.symbol))
         if not self.cik.strip() or not self.concept.strip() or not self.accession.strip():
             raise InvalidInputError("cik, concept, and accession are required.")
         object.__setattr__(self, "value", require_finite(self.value, "value"))
+        if self.period_start is not None:
+            object.__setattr__(
+                self, "period_start", require_aware_datetime(self.period_start, "period_start")
+            )
+        if not self.period_kind.strip():
+            object.__setattr__(self, "period_kind", "instant")
+        if self.raw_acceptance == "":
+            object.__setattr__(self, "raw_acceptance", None)
 
     @property
     def ref_id(self) -> str:
+        start = self.period_start.date().isoformat() if self.period_start is not None else "instant"
         end = self.time.event_time.date().isoformat()
-        return f"fact:{self.symbol}:{self.concept}:{end}:{self.accession}"
+        return (
+            f"fact:{self.symbol}:{self.taxonomy}:{self.concept}:{self.unit}:"
+            f"{start}:{end}:{self.period_kind}:{self.accession}"
+        )
 
 
 @dataclass(frozen=True, slots=True)

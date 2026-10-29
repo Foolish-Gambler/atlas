@@ -146,6 +146,9 @@ def filing_to_row(record: FilingRecord) -> dict[str, Any]:
         "primary_document": record.primary_document,
         "items": list(record.items),
         "is_amendment": record.is_amendment,
+        "raw_acceptance": record.raw_acceptance,
+        "acceptance_verified": record.acceptance_verified,
+        "intraday_eligible": record.intraday_eligible,
         **time_to_row(record.time),
     }
 
@@ -163,6 +166,9 @@ def parse_filing(
         primary_document=row.get("primary_document"),
         items=tuple(row.get("items") or ()),
         is_amendment=bool(row.get("is_amendment", False)),
+        raw_acceptance=row.get("raw_acceptance"),
+        acceptance_verified=bool(row.get("acceptance_verified", False)),
+        intraday_eligible=bool(row.get("intraday_eligible", False)),
     )
 
 
@@ -191,6 +197,8 @@ def statement_to_row(record: StatementRecord) -> dict[str, Any]:
         "cik": record.cik,
         "accession": record.accession,
         "form_type": record.form_type,
+        "period_kind": record.period_kind,
+        "period_start": record.period_start.isoformat() if record.period_start else None,
         **time_to_row(record.time),
     }
 
@@ -208,6 +216,10 @@ def parse_statement(
         cik=row.get("cik"),
         accession=row.get("accession"),
         form_type=row.get("form_type"),
+        period_kind=row.get("period_kind"),
+        period_start=(
+            parse_datetime(row["period_start"], "period_start") if row.get("period_start") else None
+        ),
     )
 
 
@@ -224,6 +236,11 @@ def fact_to_row(record: XbrlFactRecord) -> dict[str, Any]:
         "fiscal_year": record.fiscal_year,
         "fiscal_period": record.fiscal_period,
         "frame": record.frame,
+        "period_start": record.period_start.isoformat() if record.period_start else None,
+        "period_kind": record.period_kind,
+        "raw_acceptance": record.raw_acceptance,
+        "acceptance_verified": record.acceptance_verified,
+        "intraday_eligible": record.intraday_eligible,
         **time_to_row(record.time),
     }
 
@@ -245,14 +262,22 @@ def parse_fact(
         fiscal_year=row.get("fiscal_year"),
         fiscal_period=row.get("fiscal_period"),
         frame=row.get("frame"),
+        period_start=(
+            parse_datetime(row["period_start"], "period_start") if row.get("period_start") else None
+        ),
+        period_kind=str(row.get("period_kind") or "instant"),
+        raw_acceptance=row.get("raw_acceptance"),
+        acceptance_verified=bool(row.get("acceptance_verified", False)),
+        intraday_eligible=bool(row.get("intraday_eligible", False)),
     )
 
 
 def statement_event_id(statement: StatementRecord) -> str:
     if statement.accession:
+        kind = statement.period_kind or "unknown"
         return (
             f"statement:{statement.symbol}:{statement.time.event_time.isoformat()}:"
-            f"{statement.accession}"
+            f"{kind}:{statement.accession}"
         )
     return f"statement:{statement.symbol}:{statement.time.event_time.isoformat()}"
 

@@ -26,9 +26,10 @@ from atlas.ingest.http import (
     ReadOnlyHttp,
 )
 from atlas.ingest.snapshot import SnapshotManifest, SnapshotPayload, SnapshotStore
+from atlas.market_data.nyse import EASTERN
 from atlas.validation import InvalidInputError, normalize_symbol, require_finite
 
-ADAPTER_VERSION = "atlas.edgar.companyfacts.v1"
+ADAPTER_VERSION = "atlas.edgar.companyfacts.v2"
 RETRIEVAL_MOCKED_HTTP = "mocked_http"
 RETRIEVAL_VENDOR_GET = "vendor_get"
 DEFAULT_SYMBOL = "AAPL"
@@ -67,6 +68,42 @@ _EXTRA_CONCEPTS = frozenset(
 )
 _ALLOWED_CONCEPTS = (
     frozenset(name for names in _CONCEPT_ALIASES.values() for name in names) | _EXTRA_CONCEPTS
+)
+_USD = frozenset({"USD"})
+_USD_SHARES = frozenset({"USD/shares"})
+_SHARES = frozenset({"shares"})
+_CONCEPT_UNITS: dict[str, frozenset[str]] = {
+    "RevenueFromContractWithCustomerExcludingAssessedTax": _USD,
+    "Revenues": _USD,
+    "SalesRevenueNet": _USD,
+    "NetIncomeLoss": _USD,
+    "Assets": _USD,
+    "Liabilities": _USD,
+    "CashAndCashEquivalentsAtCarryingValue": _USD,
+    "NetCashProvidedByUsedInOperatingActivities": _USD,
+    "GrossProfit": _USD,
+    "OperatingIncomeLoss": _USD,
+    "LiabilitiesCurrent": _USD,
+    "AssetsCurrent": _USD,
+    "LongTermDebt": _USD,
+    "StockholdersEquity": _USD,
+    "EarningsPerShareDiluted": _USD_SHARES,
+    "EarningsPerShareBasic": _USD_SHARES,
+    "CommonStockSharesOutstanding": _SHARES,
+    "EntityCommonStockSharesOutstanding": _SHARES,
+}
+_DURATION_CONCEPTS = frozenset(
+    {
+        "RevenueFromContractWithCustomerExcludingAssessedTax",
+        "Revenues",
+        "SalesRevenueNet",
+        "NetIncomeLoss",
+        "NetCashProvidedByUsedInOperatingActivities",
+        "GrossProfit",
+        "OperatingIncomeLoss",
+        "EarningsPerShareDiluted",
+        "EarningsPerShareBasic",
+    }
 )
 
 
@@ -161,9 +198,16 @@ class EdgarAdapter:
         ingested_at = created_at or datetime.now(UTC)
         self._requests = 0
         self._max_requests = query.max_requests
-        cik = query.cik or self._lookup_cik(query.symbol)
-        submissions = self._get_json(f"https://{SEC_DATA_HOST}{_SUBMISSIONS_PATH.format(cik=cik)}")
-        facts_payload = self._get_json(f"https://{SEC_DATA_HOST}{_FACTS_PATH.format(cik=cik)}")
+        tickers_url = f"https://{SEC_WWW_HOST}{_TICKERS_PATH}"
+        tickers_payload: Any = None
+        if query.cik:
+            cik = query.cik
+        else:
+            cik, tickers_payload = self._lookup_cik(query.symbol)
+        submissions_url = f"https://{SEC_DATA_HOST}{_SUBMISSIONS_PATH.format(cik=cik)}"
+        facts_url = f"https://{SEC_DATA_HOST}{_FACTS_PATH.format(cik=cik)}"
+        submissions = self._get_json(submissions_url)
+        facts_payload = self._get_json(facts_url)
         provenance = Provenance(
             source_kind=SourceKind.SIMULATED if mocked else SourceKind.VENDOR_READ_ONLY,
             dataset_id=dataset_id,
@@ -172,8 +216,16 @@ class EdgarAdapter:
         )
         index = _index_submissions(submissions)
         filings = _filings_from_submissions(query, cik, index, provenance, ingested_at)
-        facts = _facts_from_companyfacts(query, cik, facts_payload, index, provenance, ingested_at)
-        statements = _statements_from_facts(query.symbol, cik, facts, provenance)
+        facts, fact_coverage = _facts_from_companyfacts(
+            query, cik, facts_payload, index, provenance, ingested_at
+        )
+        statements, statement_gaps = _statements_from_facts(query.symbol, cik, facts, provenance)
+        source_urls = {
+            "submissions": submissions_url,
+            "companyfacts": facts_url,
+        }
+        if tickers_payload is not None:
+            source_urls["tickers"] = tickers_url
         metadata = _ingest_metadata(
             query,
             cik=cik,
@@ -181,11 +233,37 @@ class EdgarAdapter:
             ingested_at=ingested_at,
             filings=filings,
             facts=facts,
+            fact_coverage=fact_coverage,
+            statement_gaps=statement_gaps,
+            source_urls=source_urls,
         )
-        vendor_raw = (
-            {"artifact": "submissions", "host": SEC_DATA_HOST, "body": submissions},
-            {"artifact": "companyfacts", "host": SEC_DATA_HOST, "body": facts_payload},
+        vendor_items: list[dict[str, Any]] = []
+        if tickers_payload is not None:
+            vendor_items.append(
+                {
+                    "artifact": "company_tickers",
+                    "url": tickers_url,
+                    "host": SEC_WWW_HOST,
+                    "body": tickers_payload,
+                }
+            )
+        vendor_items.extend(
+            (
+                {
+                    "artifact": "submissions",
+                    "url": submissions_url,
+                    "host": SEC_DATA_HOST,
+                    "body": submissions,
+                },
+                {
+                    "artifact": "companyfacts",
+                    "url": facts_url,
+                    "host": SEC_DATA_HOST,
+                    "body": facts_payload,
+                },
+            )
         )
+        vendor_raw = tuple(vendor_items)
         dest = store.revision_path(dataset_id, revision)
         try:
             manifest = store.create(
@@ -217,7 +295,7 @@ class EdgarAdapter:
             simulated=mocked,
         )
 
-    def _lookup_cik(self, symbol: str) -> str:
+    def _lookup_cik(self, symbol: str) -> tuple[str, Any]:
         payload = self._get_json(f"https://{SEC_WWW_HOST}{_TICKERS_PATH}")
         if not isinstance(payload, dict):
             raise EdgarIntegrityError("company_tickers.json must be a JSON object.")
@@ -226,7 +304,7 @@ class EdgarAdapter:
             if not isinstance(row, dict):
                 continue
             if str(row.get("ticker", "")).upper() == needle:
-                return _pad_cik(row.get("cik_str", row.get("cik")))
+                return _pad_cik(row.get("cik_str", row.get("cik"))), payload
         raise EdgarIntegrityError(f"ticker {symbol!r} is not present in SEC company_tickers.")
 
     def _get_json(self, url: str) -> Any:
@@ -288,6 +366,7 @@ def _index_submissions(payload: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
     accepted = recent.get("acceptanceDateTime") or []
     documents = recent.get("primaryDocument") or []
     items = recent.get("items") or []
+    headers = recent.get("headerAcceptanceDateTime") or []
     length = len(accessions)
     if not length:
         return {}
@@ -310,6 +389,7 @@ def _index_submissions(payload: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
             "acceptanceDateTime": str(accepted[i]).strip(),
             "primaryDocument": _optional_row(documents, i),
             "items": _optional_row(items, i),
+            "headerAcceptanceDateTime": _optional_row(headers, i),
         }
     return index
 
@@ -333,15 +413,15 @@ def _filings_from_submissions(
         form = str(row["form"])
         if not _form_allowed(form, allowed, query.include_amendments):
             continue
-        accepted = _parse_acceptance(str(row["acceptanceDateTime"]))
+        stamp = _availability_from_submission(row)
         period = _parse_day(str(row.get("reportDate") or ""), "reportDate")
         if _is_current_event_form(form) or period is None:
-            event_time = accepted
+            event_time = stamp.available
         else:
             event_time = datetime.combine(period, time.min, tzinfo=UTC)
-        if accepted < event_time:
+        if stamp.available < event_time:
             raise EdgarIntegrityError(
-                f"acceptance {accepted.isoformat()} precedes event {event_time.isoformat()}."
+                f"acceptance {stamp.available.isoformat()} precedes event {event_time.isoformat()}."
             )
         records.append(
             FilingRecord(
@@ -349,7 +429,7 @@ def _filings_from_submissions(
                 form_type=form,
                 time=TimeIndex(
                     event_time=event_time,
-                    available_time=accepted,
+                    available_time=stamp.available,
                     ingested_time=ingested_at,
                 ),
                 provenance=provenance,
@@ -358,6 +438,9 @@ def _filings_from_submissions(
                 primary_document=str(row.get("primaryDocument") or "") or None,
                 items=_split_items(str(row.get("items") or "")),
                 is_amendment=form.endswith("/A"),
+                raw_acceptance=stamp.raw,
+                acceptance_verified=stamp.verified,
+                intraday_eligible=stamp.intraday_eligible,
             )
         )
     records.sort(key=lambda item: (item.time.available_time, item.accession), reverse=True)
@@ -374,50 +457,69 @@ def _facts_from_companyfacts(
     index: Mapping[str, Mapping[str, Any]],
     provenance: Provenance,
     ingested_at: datetime,
-) -> list[XbrlFactRecord]:
+) -> tuple[list[XbrlFactRecord], dict[str, Any]]:
     facts_root = payload.get("facts")
     if not isinstance(facts_root, dict):
         raise EdgarIntegrityError("companyfacts.facts must be an object.")
     allowed_forms = {form.upper() for form in query.forms}
     kept: list[XbrlFactRecord] = []
     seen: set[str] = set()
+    unit_mismatch = 0
+    skipped_invalid = 0
     for taxonomy in _TAXONOMIES:
         concepts = facts_root.get(taxonomy)
         if not isinstance(concepts, dict):
             continue
-        for concept, body in concepts.items():
+        for concept in sorted(concepts):
             if concept not in _ALLOWED_CONCEPTS:
                 continue
+            body = concepts[concept]
             units = (body or {}).get("units") or {}
             if not isinstance(units, dict):
                 continue
-            for unit, rows in units.items():
+            expected_units = _CONCEPT_UNITS.get(concept)
+            for unit in sorted(units):
+                rows = units[unit]
                 if not isinstance(rows, list):
                     continue
-                if unit not in {"USD", "shares", "pure"}:
+                if expected_units is not None and unit not in expected_units:
+                    unit_mismatch += len(rows)
                     continue
                 for row in rows:
                     if not isinstance(row, dict):
+                        skipped_invalid += 1
                         continue
                     form = str(row.get("form") or "").strip()
                     if form and not _form_allowed(form, allowed_forms, query.include_amendments):
                         continue
                     accession = str(row.get("accn") or "").strip()
                     if not accession:
+                        skipped_invalid += 1
                         continue
                     end_raw = row.get("end") or row.get("instant")
-                    if not end_raw:
-                        continue
-                    event_day = _parse_day(str(end_raw), "fact end")
+                    start_day = _parse_day(str(row.get("start") or ""), "fact start")
+                    event_day = _parse_day(str(end_raw or ""), "fact end")
                     if event_day is None:
+                        skipped_invalid += 1
+                        continue
+                    if concept in _DURATION_CONCEPTS and start_day is None:
+                        skipped_invalid += 1
                         continue
                     event_time = datetime.combine(event_day, time.min, tzinfo=UTC)
-                    available = _fact_available(row, accession, index)
-                    if available < event_time:
+                    period_start = (
+                        datetime.combine(start_day, time.min, tzinfo=UTC) if start_day else None
+                    )
+                    period_kind = classify_period_kind(
+                        start_day, event_day, str(row.get("fp") or ""), str(row.get("frame") or "")
+                    )
+                    stamp = _fact_availability(row, accession, index)
+                    if stamp.available < event_time:
+                        skipped_invalid += 1
                         continue
                     try:
                         value = require_finite(row.get("val"), "val")
                     except InvalidInputError:
+                        skipped_invalid += 1
                         continue
                     record = XbrlFactRecord(
                         symbol=query.symbol,
@@ -428,7 +530,7 @@ def _facts_from_companyfacts(
                         value=value,
                         time=TimeIndex(
                             event_time=event_time,
-                            available_time=available,
+                            available_time=stamp.available,
                             ingested_time=ingested_at,
                         ),
                         provenance=provenance,
@@ -437,14 +539,34 @@ def _facts_from_companyfacts(
                         fiscal_year=_optional_int(row.get("fy")),
                         fiscal_period=str(row.get("fp") or "") or None,
                         frame=str(row.get("frame") or "") or None,
+                        period_start=period_start,
+                        period_kind=period_kind,
+                        raw_acceptance=stamp.raw,
+                        acceptance_verified=stamp.verified,
+                        intraday_eligible=stamp.intraday_eligible,
                     )
                     if record.ref_id in seen:
                         continue
                     seen.add(record.ref_id)
                     kept.append(record)
-                    if len(kept) >= query.max_facts:
-                        return kept
-    return kept
+    kept.sort(key=_fact_sort_key)
+    truncated = len(kept) > query.max_facts
+    omitted = kept[query.max_facts :] if truncated else []
+    selected = kept[: query.max_facts]
+    coverage = {
+        "candidate_facts": len(kept),
+        "stored_facts": len(selected),
+        "omitted_facts": len(omitted),
+        "truncated": truncated,
+        "selection": (
+            "Deterministic newest-first by available_time, then concept, taxonomy, unit, "
+            "period, accession. Truncation prefers recent observations, not first-seen JSON order."
+        ),
+        "unit_mismatch_rows": unit_mismatch,
+        "skipped_invalid_rows": skipped_invalid,
+        "omitted_concepts": sorted({item.concept for item in omitted}),
+    }
+    return selected, coverage
 
 
 def _statements_from_facts(
@@ -452,28 +574,51 @@ def _statements_from_facts(
     cik: str,
     facts: Sequence[XbrlFactRecord],
     provenance: Provenance,
-) -> list[StatementRecord]:
-    grouped: dict[tuple[str, str], dict[str, XbrlFactRecord]] = {}
-    for fact in facts:
-        key = (fact.accession, fact.time.event_time.date().isoformat())
-        grouped.setdefault(key, {})
-        if fact.concept not in grouped[key]:
-            grouped[key][fact.concept] = fact
+) -> tuple[list[StatementRecord], list[dict[str, Any]]]:
     statements: list[StatementRecord] = []
-    for (accession, _end), by_concept in grouped.items():
-        eps_fact = _first_concept(by_concept, _CONCEPT_ALIASES["eps_diluted"]) or _first_concept(
-            by_concept, _CONCEPT_ALIASES["eps_basic"]
-        )
-        equity = _first_concept(by_concept, _CONCEPT_ALIASES["equity"])
-        shares = _first_concept(by_concept, _CONCEPT_ALIASES["shares"])
-        if eps_fact is None or equity is None or shares is None or shares.value == 0:
+    gaps: list[dict[str, Any]] = []
+    duration_eps = [
+        fact
+        for fact in facts
+        if fact.concept in _CONCEPT_ALIASES["eps_diluted"] + _CONCEPT_ALIASES["eps_basic"]
+        and fact.period_kind in {"duration_annual", "duration_quarter"}
+    ]
+    instants = [fact for fact in facts if fact.period_kind == "instant"]
+    durations = [
+        fact
+        for fact in facts
+        if fact.period_kind in {"duration_annual", "duration_quarter", "duration_ytd"}
+    ]
+    for eps_fact in duration_eps:
+        end = eps_fact.time.event_time.date()
+        start = eps_fact.period_start.date() if eps_fact.period_start is not None else None
+        equity = _match_instant(instants, eps_fact.accession, end, _CONCEPT_ALIASES["equity"])
+        shares = _match_instant(instants, eps_fact.accession, end, _CONCEPT_ALIASES["shares"])
+        if equity is None or shares is None or shares.value == 0:
+            gaps.append(
+                {
+                    "accession": eps_fact.accession,
+                    "period_end": end.isoformat(),
+                    "period_kind": eps_fact.period_kind,
+                    "missing": [
+                        name
+                        for name, present in (("equity", equity), ("shares", shares))
+                        if present is None
+                    ],
+                    "reason": "incomplete_ratio_inputs",
+                }
+            )
             continue
-        book = equity.value / shares.value
         metrics: list[tuple[str, float]] = []
         for label, names in _CONCEPT_ALIASES.items():
             if label in {"eps_diluted", "eps_basic", "equity", "shares"}:
                 continue
-            match = _first_concept(by_concept, names)
+            if label in {"assets", "liabilities", "cash"}:
+                match = _match_instant(instants, eps_fact.accession, end, names)
+            else:
+                match = _match_duration(
+                    durations, eps_fact.accession, start, end, eps_fact.period_kind, names
+                )
             if match is not None:
                 metrics.append((label, match.value))
         statements.append(
@@ -482,23 +627,68 @@ def _statements_from_facts(
                 time=eps_fact.time,
                 provenance=provenance,
                 earnings_per_share=eps_fact.value,
-                book_value_per_share=book,
+                book_value_per_share=equity.value / shares.value,
                 metrics=tuple(metrics),
                 cik=cik,
-                accession=accession,
+                accession=eps_fact.accession,
                 form_type=eps_fact.form_type,
+                period_kind=eps_fact.period_kind,
+                period_start=eps_fact.period_start,
             )
         )
-    return statements
+    return statements, gaps
 
 
-def _first_concept(
-    by_concept: Mapping[str, XbrlFactRecord], names: Sequence[str]
+def _match_instant(
+    facts: Sequence[XbrlFactRecord],
+    accession: str,
+    end: date,
+    names: Sequence[str],
 ) -> XbrlFactRecord | None:
-    for name in names:
-        if name in by_concept:
-            return by_concept[name]
+    wanted = set(names)
+    for fact in facts:
+        if (
+            fact.accession == accession
+            and fact.concept in wanted
+            and fact.time.event_time.date() == end
+        ):
+            return fact
     return None
+
+
+def _match_duration(
+    facts: Sequence[XbrlFactRecord],
+    accession: str,
+    start: date | None,
+    end: date,
+    period_kind: str,
+    names: Sequence[str],
+) -> XbrlFactRecord | None:
+    wanted = set(names)
+    for fact in facts:
+        fact_start = fact.period_start.date() if fact.period_start is not None else None
+        if (
+            fact.accession == accession
+            and fact.concept in wanted
+            and fact.time.event_time.date() == end
+            and fact_start == start
+            and fact.period_kind == period_kind
+        ):
+            return fact
+    return None
+
+
+def _fact_sort_key(fact: XbrlFactRecord) -> tuple[Any, ...]:
+    start = fact.period_start.isoformat() if fact.period_start is not None else ""
+    return (
+        -fact.time.available_time.timestamp(),
+        fact.concept,
+        fact.taxonomy,
+        fact.unit,
+        start,
+        fact.time.event_time.isoformat(),
+        fact.accession,
+    )
 
 
 def _form_allowed(form: str, allowed: set[str], include_amendments: bool) -> bool:
@@ -521,14 +711,83 @@ def _split_items(raw: str) -> tuple[str, ...]:
     return tuple(part.strip() for part in raw.split(",") if part.strip())
 
 
-def _parse_acceptance(raw: str) -> datetime:
+@dataclass(frozen=True, slots=True)
+class _Availability:
+    available: datetime
+    raw: str | None
+    verified: bool
+    intraday_eligible: bool
+
+
+def ny_end_of_day(day: date) -> datetime:
+    """End of the America/New_York calendar date, as UTC. Not 23:59 UTC."""
+    local = datetime.combine(day, time(23, 59, 59), tzinfo=EASTERN)
+    return local.astimezone(UTC)
+
+
+def classify_period_kind(start: date | None, end: date, fiscal_period: str, frame: str) -> str:
+    if start is None:
+        return "instant"
+    days = (end - start).days + 1
+    fp = fiscal_period.upper()
+    frame_u = frame.upper()
+    if fp == "FY" or days >= 300 or (frame_u.startswith("CY") and "Q" not in frame_u):
+        return "duration_annual"
+    if days > 100:
+        return "duration_ytd"
+    if fp in {"Q1", "Q2", "Q3"} or days <= 100:
+        return "duration_quarter"
+    return "duration_other"
+
+
+def parse_sec_timestamp(raw: str) -> _Availability:
+    text = raw.strip()
+    if not text:
+        raise EdgarIntegrityError("timestamp is empty.")
+    if len(text) == 10 and text[4] == "-" and text[7] == "-":
+        day = _parse_day(text, "filed")
+        if day is None:
+            raise EdgarIntegrityError("date-only timestamp is invalid.")
+        return _Availability(ny_end_of_day(day), text, False, False)
+    normalized = text.replace("Z", "+00:00")
     try:
-        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(normalized)
     except ValueError as exc:
-        raise EdgarIntegrityError("acceptanceDateTime must be ISO-8601.") from exc
+        raise EdgarIntegrityError("timestamp must be ISO-8601.") from exc
     if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=UTC)
-    return parsed.astimezone(UTC)
+        return _Availability(ny_end_of_day(parsed.date()), text, False, False)
+    return _Availability(parsed.astimezone(UTC), text, True, True)
+
+
+def _availability_from_submission(row: Mapping[str, Any]) -> _Availability:
+    raw = str(row.get("acceptanceDateTime") or "").strip()
+    header = str(row.get("headerAcceptanceDateTime") or "").strip()
+    if not raw:
+        filed = str(row.get("filingDate") or "").strip()
+        return parse_sec_timestamp(filed)
+    stamp = parse_sec_timestamp(raw)
+    if header:
+        header_stamp = parse_sec_timestamp(header)
+        if (
+            header_stamp.verified
+            and stamp.verified
+            and abs((header_stamp.available - stamp.available).total_seconds()) > 1
+        ):
+            later = max(header_stamp.available, stamp.available)
+            return _Availability(later, raw, False, False)
+    return stamp
+
+
+def _fact_availability(
+    row: Mapping[str, Any], accession: str, index: Mapping[str, Mapping[str, Any]]
+) -> _Availability:
+    meta = index.get(accession)
+    if meta:
+        return _availability_from_submission(meta)
+    filed = str(row.get("filed") or "").strip()
+    if not filed:
+        raise EdgarIntegrityError("fact is missing filed/acceptance time.")
+    return parse_sec_timestamp(filed)
 
 
 def _parse_day(raw: str, name: str) -> date | None:
@@ -538,20 +797,6 @@ def _parse_day(raw: str, name: str) -> date | None:
         return date.fromisoformat(raw[:10])
     except ValueError as exc:
         raise EdgarIntegrityError(f"{name} must be YYYY-MM-DD.") from exc
-
-
-def _fact_available(
-    row: Mapping[str, Any], accession: str, index: Mapping[str, Mapping[str, Any]]
-) -> datetime:
-    meta = index.get(accession)
-    if meta and meta.get("acceptanceDateTime"):
-        return _parse_acceptance(str(meta["acceptanceDateTime"]))
-    filed = str(row.get("filed") or "").strip()
-    day = _parse_day(filed, "filed")
-    if day is None:
-        raise EdgarIntegrityError("fact is missing filed/acceptance time.")
-    # Date-only SEC `filed` is not an intraday print; end-of-day UTC is conservative.
-    return datetime.combine(day, time.max.replace(microsecond=0), tzinfo=UTC)
 
 
 def _optional_int(value: Any) -> int | None:
@@ -571,6 +816,9 @@ def _ingest_metadata(
     ingested_at: datetime,
     filings: Sequence[FilingRecord],
     facts: Sequence[XbrlFactRecord],
+    fact_coverage: Mapping[str, Any],
+    statement_gaps: Sequence[Mapping[str, Any]],
+    source_urls: Mapping[str, str],
 ) -> dict[str, Any]:
     if mocked:
         disclaimer = "Mocked HTTP fixture. Not authenticated SEC EDGAR data and not a live filing."
@@ -592,9 +840,14 @@ def _ingest_metadata(
             "submissions": _SUBMISSIONS_PATH.format(cik=cik),
             "companyfacts": _FACTS_PATH.format(cik=cik),
         },
+        "source_urls": dict(source_urls),
         "ingested_at": ingested_at.isoformat(),
         "filing_count": len(filings),
+        "intraday_eligible_filings": sum(1 for item in filings if item.intraday_eligible),
         "fact_count": len(facts),
+        "intraday_eligible_facts": sum(1 for item in facts if item.intraday_eligible),
+        "fact_coverage": dict(fact_coverage),
+        "incomplete_statements": list(statement_gaps),
         "query_bounds": {
             "max_filings": query.max_filings,
             "max_facts": query.max_facts,
@@ -603,7 +856,8 @@ def _ingest_metadata(
         "price_disclaimer": disclaimer,
         "research_notes": (
             "M3 ResearchArtifact.evidence_refs may cite filing:{accession} and "
-            "fact:{symbol}:{concept}:{period}:{accession}. M4 features must join on "
-            "available_time, never on the latest ingested value."
+            "fact:{symbol}:{taxonomy}:{concept}:{unit}:{start}:{end}:{period_kind}:{accession}. "
+            "M4 features must join on available_time, never on the latest ingested value. "
+            "Unverified timestamps are not intraday_eligible."
         ),
     }
