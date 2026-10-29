@@ -86,6 +86,22 @@ def build_parser() -> argparse.ArgumentParser:
     edgar_fetch.add_argument("--max-filings", type=int, default=40)
     edgar_fetch.add_argument("--max-facts", type=int, default=2000)
     edgar_fetch.add_argument("--max-requests", type=int, default=8)
+    edgar_reprocess = edgar_sub.add_parser(
+        "reprocess",
+        help="Rebuild a new revision from stored SEC JSON. No HTTP.",
+    )
+    _add_snapshot_ids(edgar_reprocess, require_ids=True)
+    edgar_reprocess.add_argument("--to-revision", required=True, help="New immutable revision id.")
+    edgar_reprocess.add_argument(
+        "--to-dataset",
+        default=None,
+        help="Destination dataset (defaults to the source dataset).",
+    )
+    edgar_coverage = edgar_sub.add_parser(
+        "coverage",
+        help="Print EDGAR concept coverage and PIT timestamp checks for a snapshot.",
+    )
+    _add_snapshot_ids(edgar_coverage, require_ids=True)
 
     paper = subparsers.add_parser("paper", help="Paper-only virtual portfolio helpers.")
     paper_sub = paper.add_subparsers(dest="paper_command", required=True)
@@ -302,6 +318,54 @@ def _edgar_command(args: argparse.Namespace) -> int:
     )
     from atlas.ingest.http import network_allowed
 
+    if args.edgar_command == "reprocess":
+        from atlas.ingest.edgar import EdgarAdapter
+
+        source = SnapshotStore(args.root).load(args.dataset, args.revision)
+        dest_dataset = args.to_dataset or args.dataset
+        result = EdgarAdapter(
+            user_agent="ATLAS-offline-reprocess", allow_network=False
+        ).ingest_from_snapshot(
+            SnapshotStore(args.root),
+            source,
+            dataset_id=dest_dataset,
+            revision=args.to_revision,
+        )
+        print(
+            json.dumps(
+                {
+                    "status": "created",
+                    "dataset_id": result.manifest.dataset_id,
+                    "revision": result.manifest.revision,
+                    "source_dataset": args.dataset,
+                    "source_revision": args.revision,
+                    "cik": result.cik,
+                    "filings": len(result.filings),
+                    "facts": len(result.facts),
+                    "statements": len(result.statements),
+                    "retrieval_mode": result.retrieval_mode,
+                    "http": False,
+                },
+                indent=2,
+            )
+        )
+        return 0
+    if args.edgar_command == "coverage":
+        from atlas.ingest.edgar import coverage_report
+
+        source = SnapshotStore(args.root).load(args.dataset, args.revision)
+        print(
+            json.dumps(
+                coverage_report(
+                    filings=source.filings(),
+                    facts=source.facts(),
+                    statements=source.statements(),
+                    metadata=source.manifest.metadata,
+                ),
+                indent=2,
+            )
+        )
+        return 0
     if args.edgar_command == "fetch-once":
         if not network_allowed():
             raise NetworkDisabledError(

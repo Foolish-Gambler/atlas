@@ -23,15 +23,17 @@ from atlas.ingest.http import (
     SEC_ALLOWED_HOSTS,
     SEC_DATA_HOST,
     SEC_WWW_HOST,
+    NetworkDisabledError,
     ReadOnlyHttp,
 )
-from atlas.ingest.snapshot import SnapshotManifest, SnapshotPayload, SnapshotStore
+from atlas.ingest.snapshot import SnapshotManifest, SnapshotPayload, SnapshotSource, SnapshotStore
 from atlas.market_data.nyse import EASTERN
 from atlas.validation import InvalidInputError, normalize_symbol, require_finite
 
-ADAPTER_VERSION = "atlas.edgar.companyfacts.v3"
+ADAPTER_VERSION = "atlas.edgar.companyfacts.v4"
 RETRIEVAL_MOCKED_HTTP = "mocked_http"
 RETRIEVAL_VENDOR_GET = "vendor_get"
+RETRIEVAL_VENDOR_REPROCESS = "vendor_reprocess"
 DEFAULT_SYMBOL = "AAPL"
 DEFAULT_FORMS = ("10-K", "10-Q", "8-K")
 DEFAULT_MAX_FILINGS = 40
@@ -56,6 +58,8 @@ _CONCEPT_ALIASES: dict[str, tuple[str, ...]] = {
     "eps_basic": ("EarningsPerShareBasic",),
     "equity": ("StockholdersEquity",),
     "shares": ("CommonStockSharesOutstanding", "EntityCommonStockSharesOutstanding"),
+    "weighted_shares_diluted": ("WeightedAverageNumberOfDilutedSharesOutstanding",),
+    "weighted_shares_basic": ("WeightedAverageNumberOfSharesOutstandingBasic",),
 }
 _EXTRA_CONCEPTS = frozenset(
     {
@@ -91,6 +95,8 @@ _CONCEPT_UNITS: dict[str, frozenset[str]] = {
     "EarningsPerShareBasic": _USD_SHARES,
     "CommonStockSharesOutstanding": _SHARES,
     "EntityCommonStockSharesOutstanding": _SHARES,
+    "WeightedAverageNumberOfDilutedSharesOutstanding": _SHARES,
+    "WeightedAverageNumberOfSharesOutstandingBasic": _SHARES,
 }
 _DURATION_CONCEPTS = frozenset(
     {
@@ -103,6 +109,8 @@ _DURATION_CONCEPTS = frozenset(
         "OperatingIncomeLoss",
         "EarningsPerShareDiluted",
         "EarningsPerShareBasic",
+        "WeightedAverageNumberOfDilutedSharesOutstanding",
+        "WeightedAverageNumberOfSharesOutstandingBasic",
     }
 )
 
@@ -169,15 +177,22 @@ class EdgarAdapter:
         allow_network: bool | None = None,
         user_agent: str | None = None,
     ) -> None:
-        self._user_agent = user_agent or load_edgar_user_agent()
-        self.http = http or ReadOnlyHttp(
-            allowed_hosts=SEC_ALLOWED_HOSTS,
-            allow_network=allow_network,
-            rate_limit_sleep=0.15,
-            timeout_seconds=30.0,
-            max_retries=3,
-            user_agent=self._user_agent,
+        self._user_agent = user_agent or (
+            "ATLAS-offline-reprocess" if allow_network is False else load_edgar_user_agent()
         )
+        if http is not None:
+            self.http = http
+        elif allow_network is False:
+            self.http = None
+        else:
+            self.http = ReadOnlyHttp(
+                allowed_hosts=SEC_ALLOWED_HOSTS,
+                allow_network=allow_network,
+                rate_limit_sleep=0.15,
+                timeout_seconds=30.0,
+                max_retries=3,
+                user_agent=self._user_agent,
+            )
         self._requests = 0
         self._max_requests = DEFAULT_MAX_REQUESTS
 
@@ -194,7 +209,6 @@ class EdgarAdapter:
         query = query or EdgarQuery()
         if retrieval_mode not in {RETRIEVAL_MOCKED_HTTP, RETRIEVAL_VENDOR_GET}:
             raise InvalidInputError("retrieval_mode must be mocked_http or vendor_get.")
-        mocked = retrieval_mode == RETRIEVAL_MOCKED_HTTP
         ingested_at = created_at or datetime.now(UTC)
         self._requests = 0
         self._max_requests = query.max_requests
@@ -208,35 +222,12 @@ class EdgarAdapter:
         facts_url = f"https://{SEC_DATA_HOST}{_FACTS_PATH.format(cik=cik)}"
         submissions = self._get_json(submissions_url)
         facts_payload = self._get_json(facts_url)
-        provenance = Provenance(
-            source_kind=SourceKind.SIMULATED if mocked else SourceKind.VENDOR_READ_ONLY,
-            dataset_id=dataset_id,
-            revision=revision,
-            vendor="sec_edgar",
-        )
-        index = _index_submissions(submissions)
-        filings = _filings_from_submissions(query, cik, index, provenance, ingested_at)
-        facts, fact_coverage = _facts_from_companyfacts(
-            query, cik, facts_payload, index, provenance, ingested_at
-        )
-        statements, statement_gaps = _statements_from_facts(query.symbol, cik, facts, provenance)
         source_urls = {
             "submissions": submissions_url,
             "companyfacts": facts_url,
         }
         if tickers_payload is not None:
             source_urls["tickers"] = tickers_url
-        metadata = _ingest_metadata(
-            query,
-            cik=cik,
-            mocked=mocked,
-            ingested_at=ingested_at,
-            filings=filings,
-            facts=facts,
-            fact_coverage=fact_coverage,
-            statement_gaps=statement_gaps,
-            source_urls=source_urls,
-        )
         vendor_items: list[dict[str, Any]] = []
         if tickers_payload is not None:
             vendor_items.append(
@@ -263,7 +254,110 @@ class EdgarAdapter:
                 },
             )
         )
-        vendor_raw = tuple(vendor_items)
+        return self._publish(
+            store,
+            dataset_id=dataset_id,
+            revision=revision,
+            query=query,
+            cik=cik,
+            submissions=submissions,
+            facts_payload=facts_payload,
+            vendor_raw=tuple(vendor_items),
+            source_urls=source_urls,
+            ingested_at=ingested_at,
+            retrieval_mode=retrieval_mode,
+        )
+
+    def ingest_from_snapshot(
+        self,
+        store: SnapshotStore,
+        source: SnapshotSource,
+        *,
+        dataset_id: str,
+        revision: str,
+        query: EdgarQuery | None = None,
+        created_at: datetime | None = None,
+    ) -> EdgarIngestResult:
+        """Rebuild facts/statements from stored SEC JSON. Does not open HTTP."""
+        if (dataset_id, revision) == (source.manifest.dataset_id, source.manifest.revision):
+            raise InvalidInputError("reprocess must write a new immutable revision.")
+        tickers_payload, submissions, facts_payload, source_urls = _payloads_from_vendor_raw(
+            source.vendor_raw()
+        )
+        cik = _cik_from_submissions(submissions)
+        meta = source.manifest.metadata
+        bounds = meta.get("query_bounds") if isinstance(meta.get("query_bounds"), dict) else {}
+        query = query or EdgarQuery(
+            symbol=str(meta.get("symbol") or DEFAULT_SYMBOL),
+            forms=tuple(meta.get("forms") or DEFAULT_FORMS),
+            include_amendments=bool(meta.get("include_amendments", True)),
+            max_filings=int(bounds.get("max_filings") or DEFAULT_MAX_FILINGS),
+            max_facts=int(bounds.get("max_facts") or DEFAULT_MAX_FACTS),
+            max_requests=int(bounds.get("max_requests") or DEFAULT_MAX_REQUESTS),
+            cik=cik,
+        )
+        source_mode = str(meta.get("retrieval_mode") or "")
+        if source.manifest.source_kind is SourceKind.VENDOR_READ_ONLY or source_mode in {
+            RETRIEVAL_VENDOR_GET,
+            RETRIEVAL_VENDOR_REPROCESS,
+        }:
+            retrieval_mode = RETRIEVAL_VENDOR_REPROCESS
+        else:
+            retrieval_mode = RETRIEVAL_MOCKED_HTTP
+        return self._publish(
+            store,
+            dataset_id=dataset_id,
+            revision=revision,
+            query=query,
+            cik=cik,
+            submissions=submissions,
+            facts_payload=facts_payload,
+            vendor_raw=tuple(dict(row) for row in source.vendor_raw()),
+            source_urls=source_urls,
+            ingested_at=created_at or datetime.now(UTC),
+            retrieval_mode=retrieval_mode,
+        )
+
+    def _publish(
+        self,
+        store: SnapshotStore,
+        *,
+        dataset_id: str,
+        revision: str,
+        query: EdgarQuery,
+        cik: str,
+        submissions: Mapping[str, Any],
+        facts_payload: Mapping[str, Any],
+        vendor_raw: tuple[dict[str, Any], ...],
+        source_urls: Mapping[str, str],
+        ingested_at: datetime,
+        retrieval_mode: str,
+    ) -> EdgarIngestResult:
+        mocked = retrieval_mode == RETRIEVAL_MOCKED_HTTP
+        provenance = Provenance(
+            source_kind=SourceKind.SIMULATED if mocked else SourceKind.VENDOR_READ_ONLY,
+            dataset_id=dataset_id,
+            revision=revision,
+            vendor="sec_edgar",
+        )
+        index = _index_submissions(submissions)
+        filings = _filings_from_submissions(query, cik, index, provenance, ingested_at)
+        facts, fact_coverage = _facts_from_companyfacts(
+            query, cik, facts_payload, index, provenance, ingested_at
+        )
+        statements, statement_gaps = _statements_from_facts(query.symbol, cik, facts, provenance)
+        metadata = _ingest_metadata(
+            query,
+            cik=cik,
+            mocked=mocked,
+            retrieval_mode=retrieval_mode,
+            ingested_at=ingested_at,
+            filings=filings,
+            facts=facts,
+            fact_coverage=fact_coverage,
+            statement_gaps=statement_gaps,
+            source_urls=source_urls,
+        )
         dest = store.revision_path(dataset_id, revision)
         try:
             manifest = store.create(
@@ -308,6 +402,8 @@ class EdgarAdapter:
         raise EdgarIntegrityError(f"ticker {symbol!r} is not present in SEC company_tickers.")
 
     def _get_json(self, url: str) -> Any:
+        if self.http is None:
+            raise NetworkDisabledError("EDGAR HTTP client is not configured for this adapter.")
         self._requests += 1
         if self._requests > self._max_requests:
             raise EdgarIntegrityError(f"EDGAR ingest exceeded max_requests={self._max_requests}.")
@@ -440,7 +536,7 @@ def _filings_from_submissions(
                 is_amendment=form.endswith("/A"),
                 raw_acceptance=stamp.raw,
                 acceptance_verified=stamp.verified,
-                intraday_eligible=stamp.intraday_eligible,
+                intraday_eligible=bool(stamp.verified and stamp.intraday_eligible),
             )
         )
     records.sort(key=lambda item: (item.time.available_time, item.accession), reverse=True)
@@ -544,7 +640,7 @@ def _facts_from_companyfacts(
                         period_kind=period_kind,
                         raw_acceptance=stamp.raw,
                         acceptance_verified=stamp.verified,
-                        intraday_eligible=stamp.intraday_eligible,
+                        intraday_eligible=bool(stamp.verified and stamp.intraday_eligible),
                     )
                     previous = seen.get(record.ref_id)
                     if previous is not None:
@@ -555,29 +651,101 @@ def _facts_from_companyfacts(
                     seen[record.ref_id] = record
                     kept.append(record)
     kept.sort(key=_fact_sort_key)
-    truncated = len(kept) > query.max_facts
-    omitted = kept[query.max_facts :] if truncated else []
-    selected = kept[: query.max_facts]
-    coverage = {
-        "candidate_facts": len(kept),
-        "stored_facts": len(selected),
-        "omitted_facts": len(omitted),
-        "truncated": truncated,
-        "selection": (
-            "Deterministic newest-first by available_time, then concept, taxonomy, unit, "
-            "period, accession. Truncation prefers recent observations, not first-seen JSON order."
-        ),
-        "unit_mismatch_rows": unit_mismatch,
-        "skipped_invalid_rows": skipped_invalid,
-        "duplicate_fact_rows": duplicate_rows,
-        "omitted_concepts": sorted({item.concept for item in omitted}),
-    }
+    selected, coverage = _select_facts(kept, query.max_facts)
+    coverage.update(
+        {
+            "unit_mismatch_rows": unit_mismatch,
+            "skipped_invalid_rows": skipped_invalid,
+            "duplicate_fact_rows": duplicate_rows,
+        }
+    )
     return selected, coverage
 
 
 _EPS_DILUTED = frozenset(_CONCEPT_ALIASES["eps_diluted"])
 _EPS_BASIC = frozenset(_CONCEPT_ALIASES["eps_basic"])
 _STATEMENT_PERIODS = frozenset({"duration_annual", "duration_quarter", "duration_ytd"})
+
+
+def _select_facts(
+    kept: Sequence[XbrlFactRecord], max_facts: int
+) -> tuple[list[XbrlFactRecord], dict[str, Any]]:
+    ordered = list(kept)
+    pinned: dict[str, XbrlFactRecord] = {}
+    instants = [fact for fact in ordered if fact.period_kind == "instant"]
+    durations = [fact for fact in ordered if fact.period_kind in _STATEMENT_PERIODS]
+    grouped = _eps_groups(ordered)
+    groups_newest = sorted(
+        grouped.items(),
+        key=lambda item: (
+            -max(fact.time.available_time.timestamp() for fact in item[1]),
+            _statement_sort_key(item[0]),
+        ),
+    )
+    for _key, members in groups_newest:
+        candidate: dict[str, XbrlFactRecord] = {}
+        diluted = [fact for fact in members if fact.concept in _EPS_DILUTED]
+        basic = [fact for fact in members if fact.concept in _EPS_BASIC]
+        eps_fact = _require_consistent_value(diluted or basic, "earnings_per_share")
+        if eps_fact is None:
+            continue
+        start = eps_fact.period_start.date() if eps_fact.period_start is not None else None
+        end = eps_fact.time.event_time.date()
+        for item in (
+            eps_fact,
+            _match_instant(
+                instants,
+                accession=eps_fact.accession,
+                end=end,
+                names=_CONCEPT_ALIASES["equity"],
+                as_of=eps_fact.time.available_time,
+            ),
+            _match_shares(
+                instants,
+                durations,
+                eps_fact,
+                start=start,
+                end=end,
+                period_kind=eps_fact.period_kind,
+            ),
+        ):
+            if item is not None:
+                candidate[item.ref_id] = item
+        if len(pinned) + len(candidate) > max_facts:
+            continue
+        pinned.update(candidate)
+    remaining = [fact for fact in ordered if fact.ref_id not in pinned]
+    selected = list(pinned.values()) + remaining[: max(0, max_facts - len(pinned))]
+    selected.sort(key=_fact_sort_key)
+    omitted = [fact for fact in ordered if fact.ref_id not in {item.ref_id for item in selected}]
+    truncated = len(ordered) > len(selected)
+    coverage = {
+        "candidate_facts": len(ordered),
+        "stored_facts": len(selected),
+        "omitted_facts": len(omitted),
+        "truncated": truncated,
+        "pinned_ratio_facts": len(pinned),
+        "selection": (
+            "Pin EPS/equity/shares needed for statement ratios, then fill remaining "
+            "slots newest-first by available_time, concept, taxonomy, unit, period, accession. "
+            "Truncation must not drop ratio inputs for kept EPS observations."
+        ),
+        "omitted_concepts": sorted({item.concept for item in omitted}),
+    }
+    return selected, coverage
+
+
+def _eps_groups(
+    facts: Sequence[XbrlFactRecord],
+) -> dict[tuple[str, str, date | None, date, str], list[XbrlFactRecord]]:
+    grouped: dict[tuple[str, str, date | None, date, str], list[XbrlFactRecord]] = {}
+    for fact in facts:
+        if fact.concept not in _EPS_DILUTED | _EPS_BASIC:
+            continue
+        if fact.period_kind not in _STATEMENT_PERIODS:
+            continue
+        grouped.setdefault(_statement_group_key(fact), []).append(fact)
+    return grouped
 
 
 def _statement_group_key(fact: XbrlFactRecord) -> tuple[str, str, date | None, date, str]:
@@ -616,8 +784,21 @@ def _statements_from_facts(
         if eps_fact is None:
             continue
         _symbol, accession, start, end, period_kind = key
-        equity = _match_instant(instants, accession, end, _CONCEPT_ALIASES["equity"])
-        shares = _match_instant(instants, accession, end, _CONCEPT_ALIASES["shares"])
+        equity = _match_instant(
+            instants,
+            accession=accession,
+            end=end,
+            names=_CONCEPT_ALIASES["equity"],
+            as_of=eps_fact.time.available_time,
+        )
+        shares = _match_shares(
+            instants,
+            durations,
+            eps_fact,
+            start=start,
+            end=end,
+            period_kind=period_kind,
+        )
         if equity is None or shares is None or shares.value == 0:
             gaps.append(
                 {
@@ -636,10 +817,23 @@ def _statements_from_facts(
             continue
         metrics: list[tuple[str, float]] = []
         for label, names in _CONCEPT_ALIASES.items():
-            if label in {"eps_diluted", "eps_basic", "equity", "shares"}:
+            if label in {
+                "eps_diluted",
+                "eps_basic",
+                "equity",
+                "shares",
+                "weighted_shares_diluted",
+                "weighted_shares_basic",
+            }:
                 continue
             if label in {"assets", "liabilities", "cash"}:
-                match = _match_instant(instants, accession, end, names)
+                match = _match_instant(
+                    instants,
+                    accession=accession,
+                    end=end,
+                    names=names,
+                    as_of=eps_fact.time.available_time,
+                )
             else:
                 match = _match_duration(durations, accession, start, end, period_kind, names)
             if match is not None:
@@ -675,21 +869,80 @@ def _statement_sort_key(
     )
 
 
+def _match_shares(
+    instants: Sequence[XbrlFactRecord],
+    durations: Sequence[XbrlFactRecord],
+    eps_fact: XbrlFactRecord,
+    *,
+    start: date | None,
+    end: date,
+    period_kind: str,
+) -> XbrlFactRecord | None:
+    shares = _match_instant(
+        instants,
+        accession=eps_fact.accession,
+        end=end,
+        names=_CONCEPT_ALIASES["shares"],
+        as_of=eps_fact.time.available_time,
+    )
+    if shares is not None:
+        return shares
+    weighted = (
+        _CONCEPT_ALIASES["weighted_shares_diluted"]
+        if eps_fact.concept in _EPS_DILUTED
+        else _CONCEPT_ALIASES["weighted_shares_basic"]
+    )
+    return _match_duration(durations, eps_fact.accession, start, end, period_kind, weighted)
+
+
 def _match_instant(
     facts: Sequence[XbrlFactRecord],
+    *,
     accession: str,
     end: date,
     names: Sequence[str],
+    as_of: datetime,
 ) -> XbrlFactRecord | None:
-    wanted = set(names)
-    matches = [
+    for name in names:
+        match = _match_instant_concept(
+            facts, accession=accession, end=end, concept=name, as_of=as_of
+        )
+        if match is not None:
+            return match
+    return None
+
+
+def _match_instant_concept(
+    facts: Sequence[XbrlFactRecord],
+    *,
+    accession: str,
+    end: date,
+    concept: str,
+    as_of: datetime,
+) -> XbrlFactRecord | None:
+    same = [
         fact
         for fact in facts
         if fact.accession == accession
-        and fact.concept in wanted
+        and fact.concept == concept
         and fact.time.event_time.date() == end
     ]
-    return _require_consistent_value(matches, ",".join(names))
+    if same:
+        return _require_consistent_value(same, concept)
+    visible = [
+        fact
+        for fact in facts
+        if fact.concept == concept
+        and fact.time.event_time.date() == end
+        and fact.time.available_time <= as_of
+    ]
+    if not visible:
+        return None
+    latest = max(fact.time.available_time for fact in visible)
+    return _require_consistent_value(
+        [fact for fact in visible if fact.time.available_time == latest],
+        concept,
+    )
 
 
 def _match_duration(
@@ -858,11 +1111,86 @@ def _optional_int(value: Any) -> int | None:
         return None
 
 
+def _payloads_from_vendor_raw(
+    rows: Sequence[Mapping[str, Any]],
+) -> tuple[Any, Mapping[str, Any], Mapping[str, Any], dict[str, str]]:
+    tickers: Any = None
+    submissions: Mapping[str, Any] | None = None
+    companyfacts: Mapping[str, Any] | None = None
+    urls: dict[str, str] = {}
+    for row in rows:
+        artifact = str(row.get("artifact") or "")
+        body = row.get("body")
+        url = str(row.get("url") or "")
+        if url:
+            if artifact == "company_tickers":
+                urls["tickers"] = url
+            elif artifact:
+                urls[artifact] = url
+        if artifact == "company_tickers":
+            tickers = body
+        elif artifact == "submissions" and isinstance(body, dict):
+            submissions = body
+        elif artifact == "companyfacts" and isinstance(body, dict):
+            companyfacts = body
+    if submissions is None or companyfacts is None:
+        raise EdgarIntegrityError("stored snapshot is missing submissions or companyfacts JSON.")
+    return tickers, submissions, companyfacts, urls
+
+
+def _cik_from_submissions(payload: Mapping[str, Any]) -> str:
+    return _pad_cik(payload.get("cik") or payload.get("cik_str"))
+
+
+def coverage_report(
+    *,
+    filings: Sequence[FilingRecord],
+    facts: Sequence[XbrlFactRecord],
+    statements: Sequence[StatementRecord],
+    metadata: Mapping[str, Any],
+) -> dict[str, Any]:
+    concepts: dict[str, int] = {}
+    for fact in facts:
+        concepts[fact.concept] = concepts.get(fact.concept, 0) + 1
+    required = (
+        "EarningsPerShareDiluted",
+        "RevenueFromContractWithCustomerExcludingAssessedTax",
+        "Assets",
+        "Liabilities",
+        "NetCashProvidedByUsedInOperatingActivities",
+        "CashAndCashEquivalentsAtCarryingValue",
+        "CommonStockSharesOutstanding",
+        "StockholdersEquity",
+    )
+    return {
+        "symbol": metadata.get("symbol"),
+        "cik": metadata.get("cik"),
+        "adapter_version": metadata.get("adapter_version"),
+        "retrieval_mode": metadata.get("retrieval_mode"),
+        "filings": len(filings),
+        "facts": len(facts),
+        "statements": len(statements),
+        "incomplete_statements": list(metadata.get("incomplete_statements") or []),
+        "concepts": dict(sorted(concepts.items())),
+        "required_concept_counts": {name: concepts.get(name, 0) for name in required},
+        "acceptance_verified_filings": sum(1 for item in filings if item.acceptance_verified),
+        "acceptance_verified_facts": sum(1 for item in facts if item.acceptance_verified),
+        "intraday_eligible_filings": sum(1 for item in filings if item.intraday_eligible),
+        "intraday_eligible_facts": sum(1 for item in facts if item.intraday_eligible),
+        "unverified_intraday_facts": sum(
+            1 for item in facts if item.intraday_eligible and not item.acceptance_verified
+        ),
+        "fact_coverage": dict(metadata.get("fact_coverage") or {}),
+        "statement_identity": metadata.get("statement_identity"),
+    }
+
+
 def _ingest_metadata(
     query: EdgarQuery,
     *,
     cik: str,
     mocked: bool,
+    retrieval_mode: str,
     ingested_at: datetime,
     filings: Sequence[FilingRecord],
     facts: Sequence[XbrlFactRecord],
@@ -870,14 +1198,16 @@ def _ingest_metadata(
     statement_gaps: Sequence[Mapping[str, Any]],
     source_urls: Mapping[str, str],
 ) -> dict[str, Any]:
-    if mocked:
+    if retrieval_mode == RETRIEVAL_VENDOR_REPROCESS:
+        disclaimer = "Reprocessed from stored SEC JSON. No additional HTTP. Not investment advice."
+    elif mocked:
         disclaimer = "Mocked HTTP fixture. Not authenticated SEC EDGAR data and not a live filing."
     else:
         disclaimer = "Read-only SEC EDGAR historical GET. Not investment advice."
     return {
         "vendor": "sec_edgar",
         "adapter_version": ADAPTER_VERSION,
-        "retrieval_mode": RETRIEVAL_MOCKED_HTTP if mocked else RETRIEVAL_VENDOR_GET,
+        "retrieval_mode": retrieval_mode,
         "authenticated_vendor_data": not mocked,
         "symbol": query.symbol,
         "cik": cik,
@@ -893,9 +1223,14 @@ def _ingest_metadata(
         "source_urls": dict(source_urls),
         "ingested_at": ingested_at.isoformat(),
         "filing_count": len(filings),
+        "acceptance_verified_filings": sum(1 for item in filings if item.acceptance_verified),
         "intraday_eligible_filings": sum(1 for item in filings if item.intraday_eligible),
         "fact_count": len(facts),
+        "acceptance_verified_facts": sum(1 for item in facts if item.acceptance_verified),
         "intraday_eligible_facts": sum(1 for item in facts if item.intraday_eligible),
+        "unverified_intraday_facts": sum(
+            1 for item in facts if item.intraday_eligible and not item.acceptance_verified
+        ),
         "fact_coverage": dict(fact_coverage),
         "incomplete_statements": list(statement_gaps),
         "statement_identity": (

@@ -60,9 +60,13 @@
 
 `AlpacaBarsAdapter`, NYSE RTH 캘린더, `$10,000` 페이퍼 데모. 실제 `data.alpaca.markets` 호출은 `ATLAS_ALLOW_NETWORK`와 사람 승인이 필요하다.
 
-### M2-C — 구현: SEC EDGAR 공시·제표 (모킹 HTTP)
+### M2-C — 완료: SEC EDGAR 공시·제표 (모킹 HTTP + 승인된 1회 GET)
 
-`EdgarAdapter`: ticker→CIK, 10-K/10-Q/8-K, XBRL companyfacts. `available_time`은 EDGAR acceptance. 실제 `data.sec.gov` GET은 `ATLAS_ALLOW_NETWORK`와 `ATLAS_EDGAR_USER_AGENT`가 필요하다.
+`EdgarAdapter`: ticker→CIK, 10-K/10-Q/8-K, XBRL companyfacts. `available_time`은 EDGAR acceptance. 실제 `data.sec.gov` GET은 `ATLAS_ALLOW_NETWORK`와 `ATLAS_EDGAR_USER_AGENT`가 필요하다. 저장된 `vendor/raw_bars.jsonl`에서 **추가 HTTP 없이** 새 revision으로 재처리할 수 있다 (`atlas edgar reprocess`).
+
+### M2-D — 다음: 공시 원문 문서 (LLM 리서치 입력)
+
+10-K/10-Q/8-K **primary document** HTML/txt를 archives.sec.gov에서 GET-only로 스냅샷에 넣는다. LLM은 `ResearchArtifact`만 만들고 주문 객체를 만들지 않는다. 설계: `docs/M2D_FILING_DOCUMENTS.md`.
 
 사람 승인 후에만 HTTP를 연다. 이후 요지:
 

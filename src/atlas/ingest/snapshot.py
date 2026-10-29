@@ -432,7 +432,17 @@ def _write_payload(
         "facts": len(payload.facts),
         "vendor_raw": len(payload.vendor_raw),
     }
-    symbols = tuple(sorted({bar.symbol for bar in payload.bars}))
+    symbols = tuple(
+        sorted(
+            {
+                *(bar.symbol for bar in payload.bars),
+                *(item.symbol for item in payload.filings),
+                *(item.symbol for item in payload.news),
+                *(item.symbol for item in payload.statements),
+                *(item.symbol for item in payload.facts),
+            }
+        )
+    )
     return files, counts, symbols
 
 

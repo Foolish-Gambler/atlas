@@ -36,7 +36,7 @@ Immutable financial datasets live on local disk. HTTP, credentials, and live bro
 | `created_at` | Timezone-aware snapshot creation time |
 | `ingested_at` | Timezone-aware ingest stamp recorded on the snapshot |
 | `files` | Relative path → SHA-256 hex digest of exact file bytes |
-| `symbols` | Sorted symbols present in bar files |
+| `symbols` | Sorted symbols present on bars, filings, statements, news, or XBRL facts |
 | `counts` | Record counts by kind |
 | `metadata` | Optional vendor query (feed, adjustment, timeframe, `execution_eligible`) |
 

@@ -12,11 +12,13 @@ from atlas.backtesting.view import build_view
 from atlas.contracts import EventClock
 from atlas.ingest.codec import statement_file_stem
 from atlas.ingest.edgar import (
+    RETRIEVAL_VENDOR_REPROCESS,
     EdgarIntegrityError,
     EdgarQuery,
     MissingEdgarUserAgentError,
     adapter_for_tests,
     classify_period_kind,
+    coverage_report,
     load_edgar_user_agent,
     ny_end_of_day,
     parse_sec_timestamp,
@@ -24,6 +26,7 @@ from atlas.ingest.edgar import (
 from atlas.ingest.http import ReadOnlyHttp, ReadOnlyHttpError
 from atlas.ingest.snapshot import RevisionExistsError, SnapshotStore
 from atlas.market_data.nyse import EASTERN
+from atlas.validation import InvalidInputError
 
 FIXTURE = json.loads(
     (Path(__file__).parent / "fixtures" / "ingest" / "edgar" / "aapl_pages.json").read_text(
@@ -294,7 +297,12 @@ def test_basic_diluted_and_multi_period_statements_use_unique_filenames(
     collision = [item for item in result.statements if item.accession == "0000320193-26-000020"]
     kinds = {item.period_kind for item in collision}
     assert kinds == {"duration_quarter", "duration_ytd"}
-    quarter = next(item for item in collision if item.period_kind == "duration_quarter")
+    quarter = next(
+        item
+        for item in collision
+        if item.period_kind == "duration_quarter"
+        and item.time.event_time.date().isoformat() == "2026-06-27"
+    )
     ytd = next(item for item in collision if item.period_kind == "duration_ytd")
     assert quarter.earnings_per_share == 1.57
     assert ytd.earnings_per_share == 4.96
@@ -316,7 +324,13 @@ def test_basic_diluted_and_multi_period_statements_use_unique_filenames(
     ]
     assert amendment_eps
     assert amendment_eps[0].value == 6.14
-    assert all(item.accession != "0000320193-23-000077" for item in result.statements)
+    restated = next(
+        item
+        for item in result.statements
+        if item.accession == "0000320193-23-000077" and item.period_kind == "duration_annual"
+    )
+    assert restated.earnings_per_share == 6.14
+    assert original.accession != restated.accession
 
 
 def test_conflicting_xbrl_observation_rejects_without_partial_revision(
@@ -349,3 +363,97 @@ def test_conflicting_xbrl_observation_rejects_without_partial_revision(
         )
     assert not (tmp_path / "edgar-conflict" / "1").exists()
     assert not list(tmp_path.rglob("manifest.json"))
+
+
+def test_comparative_shares_use_pit_prior_accession(edgar_env: None, tmp_path: Path) -> None:
+    store = SnapshotStore(tmp_path)
+    result = adapter_for_tests(_handler()).ingest(
+        store,
+        dataset_id="edgar-pit-shares",
+        revision="1",
+        query=EdgarQuery(symbol="AAPL"),
+    )
+    assert result.manifest.symbols == ("AAPL",)
+    assert result.manifest.metadata["unverified_intraday_facts"] == 0
+    naive = next(item for item in result.filings if item.accession.endswith("000200"))
+    assert naive.acceptance_verified is False
+    assert naive.intraday_eligible is False
+    comparative = next(
+        item
+        for item in result.statements
+        if item.accession == "0000320193-26-000020"
+        and item.time.event_time.date().isoformat() == "2025-06-28"
+    )
+    assert comparative.book_value_per_share == pytest.approx(65830000000 / 14856722000)
+    assert comparative.book_value_per_share != pytest.approx(65830000000 / 14948179000)
+    loaded = store.load("edgar-pit-shares", "1")
+    clock = EventClock(loaded.stream())
+    before_prior = datetime(2025, 7, 31, tzinfo=UTC)
+    prior_view = build_view(loaded, clock.visible(before_prior), before_prior)
+    assert not any(fact.accession == "0000320193-25-000073" for fact in prior_view.facts)
+    after_prior = datetime(2025, 8, 2, tzinfo=UTC)
+    later_view = build_view(loaded, clock.visible(after_prior), after_prior)
+    assert any(fact.accession == "0000320193-25-000073" for fact in later_view.facts)
+    assert not any(item.accession == "0000320193-26-000020" for item in later_view.statements)
+    report = coverage_report(
+        filings=result.filings,
+        facts=result.facts,
+        statements=result.statements,
+        metadata=result.manifest.metadata,
+    )
+    assert report["required_concept_counts"]["EarningsPerShareDiluted"] > 0
+    assert report["concepts"].get("Revenues", 0) > 0
+    assert report["required_concept_counts"]["CommonStockSharesOutstanding"] > 0
+    assert report["unverified_intraday_facts"] == 0
+
+
+def test_max_facts_pins_ratio_inputs(edgar_env: None, tmp_path: Path) -> None:
+    result = adapter_for_tests(_handler()).ingest(
+        SnapshotStore(tmp_path),
+        dataset_id="edgar-pin",
+        revision="1",
+        query=EdgarQuery(symbol="AAPL", max_facts=3),
+    )
+    concepts = {fact.concept for fact in result.facts}
+    assert "EarningsPerShareDiluted" in concepts or "EarningsPerShareBasic" in concepts
+    assert (
+        "CommonStockSharesOutstanding" in concepts
+        or "EntityCommonStockSharesOutstanding" in concepts
+    )
+    assert result.statements
+    assert result.manifest.metadata["fact_coverage"]["pinned_ratio_facts"] >= 1
+
+
+def test_offline_reprocess_writes_new_revision_without_http(
+    edgar_env: None, tmp_path: Path
+) -> None:
+    store = SnapshotStore(tmp_path)
+    first = adapter_for_tests(_handler()).ingest(
+        store,
+        dataset_id="edgar-aapl",
+        revision="mock-1",
+        query=EdgarQuery(symbol="AAPL"),
+    )
+    source = store.load("edgar-aapl", "mock-1")
+
+    def forbidden(_request: httpx.Request) -> httpx.Response:
+        raise AssertionError("reprocess must not open HTTP")
+
+    second = adapter_for_tests(forbidden).ingest_from_snapshot(
+        store,
+        source,
+        dataset_id="edgar-aapl",
+        revision="mock-2",
+    )
+    assert second.retrieval_mode == "mocked_http"
+    assert store.load("edgar-aapl", "mock-1").manifest.files == first.manifest.files
+    assert (tmp_path / "edgar-aapl" / "mock-1").exists()
+    assert second.manifest.revision == "mock-2"
+    with pytest.raises(InvalidInputError, match="new immutable revision"):
+        adapter_for_tests(forbidden).ingest_from_snapshot(
+            store,
+            source,
+            dataset_id="edgar-aapl",
+            revision="mock-1",
+        )
+    assert RETRIEVAL_VENDOR_REPROCESS == "vendor_reprocess"
