@@ -45,6 +45,7 @@ from atlas.ingest.codec import (
     parse_statement,
     prediction_to_row,
     research_to_row,
+    statement_file_stem,
     statement_to_row,
 )
 from atlas.ingest.local import LocalFixtureSource
@@ -401,16 +402,7 @@ def _write_payload(
         lambda item: f"{item.symbol}-{item.time.event_time.strftime('%Y%m%dT%H%M%S')}",
         news_to_row,
     )
-    write_json_dir(
-        "statements",
-        payload.statements,
-        lambda item: (
-            f"{item.symbol}-{item.time.event_time.strftime('%Y%m%d')}-{item.accession}"
-            if item.accession
-            else f"{item.symbol}-{item.time.event_time.strftime('%Y%m%d')}"
-        ),
-        statement_to_row,
-    )
+    write_json_dir("statements", payload.statements, statement_file_stem, statement_to_row)
     write_json_dir("research", payload.research, lambda item: item.artifact_id, research_to_row)
     write_json_dir(
         "predictions", payload.predictions, lambda item: item.prediction_id, prediction_to_row

@@ -29,7 +29,7 @@ from atlas.ingest.snapshot import SnapshotManifest, SnapshotPayload, SnapshotSto
 from atlas.market_data.nyse import EASTERN
 from atlas.validation import InvalidInputError, normalize_symbol, require_finite
 
-ADAPTER_VERSION = "atlas.edgar.companyfacts.v2"
+ADAPTER_VERSION = "atlas.edgar.companyfacts.v3"
 RETRIEVAL_MOCKED_HTTP = "mocked_http"
 RETRIEVAL_VENDOR_GET = "vendor_get"
 DEFAULT_SYMBOL = "AAPL"
@@ -463,9 +463,10 @@ def _facts_from_companyfacts(
         raise EdgarIntegrityError("companyfacts.facts must be an object.")
     allowed_forms = {form.upper() for form in query.forms}
     kept: list[XbrlFactRecord] = []
-    seen: set[str] = set()
+    seen: dict[str, XbrlFactRecord] = {}
     unit_mismatch = 0
     skipped_invalid = 0
+    duplicate_rows = 0
     for taxonomy in _TAXONOMIES:
         concepts = facts_root.get(taxonomy)
         if not isinstance(concepts, dict):
@@ -545,9 +546,13 @@ def _facts_from_companyfacts(
                         acceptance_verified=stamp.verified,
                         intraday_eligible=stamp.intraday_eligible,
                     )
-                    if record.ref_id in seen:
-                        continue
-                    seen.add(record.ref_id)
+                    previous = seen.get(record.ref_id)
+                    if previous is not None:
+                        if previous.value == record.value:
+                            duplicate_rows += 1
+                            continue
+                        raise EdgarIntegrityError(f"conflicting XBRL observation {record.ref_id}")
+                    seen[record.ref_id] = record
                     kept.append(record)
     kept.sort(key=_fact_sort_key)
     truncated = len(kept) > query.max_facts
@@ -564,9 +569,26 @@ def _facts_from_companyfacts(
         ),
         "unit_mismatch_rows": unit_mismatch,
         "skipped_invalid_rows": skipped_invalid,
+        "duplicate_fact_rows": duplicate_rows,
         "omitted_concepts": sorted({item.concept for item in omitted}),
     }
     return selected, coverage
+
+
+_EPS_DILUTED = frozenset(_CONCEPT_ALIASES["eps_diluted"])
+_EPS_BASIC = frozenset(_CONCEPT_ALIASES["eps_basic"])
+_STATEMENT_PERIODS = frozenset({"duration_annual", "duration_quarter", "duration_ytd"})
+
+
+def _statement_group_key(fact: XbrlFactRecord) -> tuple[str, str, date | None, date, str]:
+    start = fact.period_start.date() if fact.period_start is not None else None
+    return (
+        fact.symbol,
+        fact.accession,
+        start,
+        fact.time.event_time.date(),
+        fact.period_kind,
+    )
 
 
 def _statements_from_facts(
@@ -577,29 +599,32 @@ def _statements_from_facts(
 ) -> tuple[list[StatementRecord], list[dict[str, Any]]]:
     statements: list[StatementRecord] = []
     gaps: list[dict[str, Any]] = []
-    duration_eps = [
-        fact
-        for fact in facts
-        if fact.concept in _CONCEPT_ALIASES["eps_diluted"] + _CONCEPT_ALIASES["eps_basic"]
-        and fact.period_kind in {"duration_annual", "duration_quarter"}
-    ]
+    grouped: dict[tuple[str, str, date | None, date, str], list[XbrlFactRecord]] = {}
+    for fact in facts:
+        if fact.concept not in _EPS_DILUTED | _EPS_BASIC:
+            continue
+        if fact.period_kind not in _STATEMENT_PERIODS:
+            continue
+        grouped.setdefault(_statement_group_key(fact), []).append(fact)
     instants = [fact for fact in facts if fact.period_kind == "instant"]
-    durations = [
-        fact
-        for fact in facts
-        if fact.period_kind in {"duration_annual", "duration_quarter", "duration_ytd"}
-    ]
-    for eps_fact in duration_eps:
-        end = eps_fact.time.event_time.date()
-        start = eps_fact.period_start.date() if eps_fact.period_start is not None else None
-        equity = _match_instant(instants, eps_fact.accession, end, _CONCEPT_ALIASES["equity"])
-        shares = _match_instant(instants, eps_fact.accession, end, _CONCEPT_ALIASES["shares"])
+    durations = [fact for fact in facts if fact.period_kind in _STATEMENT_PERIODS]
+    for key in sorted(grouped, key=_statement_sort_key):
+        members = grouped[key]
+        diluted = [fact for fact in members if fact.concept in _EPS_DILUTED]
+        basic = [fact for fact in members if fact.concept in _EPS_BASIC]
+        eps_fact = _require_consistent_value(diluted or basic, "earnings_per_share")
+        if eps_fact is None:
+            continue
+        _symbol, accession, start, end, period_kind = key
+        equity = _match_instant(instants, accession, end, _CONCEPT_ALIASES["equity"])
+        shares = _match_instant(instants, accession, end, _CONCEPT_ALIASES["shares"])
         if equity is None or shares is None or shares.value == 0:
             gaps.append(
                 {
-                    "accession": eps_fact.accession,
+                    "accession": accession,
+                    "period_start": start.isoformat() if start is not None else None,
                     "period_end": end.isoformat(),
-                    "period_kind": eps_fact.period_kind,
+                    "period_kind": period_kind,
                     "missing": [
                         name
                         for name, present in (("equity", equity), ("shares", shares))
@@ -614,11 +639,9 @@ def _statements_from_facts(
             if label in {"eps_diluted", "eps_basic", "equity", "shares"}:
                 continue
             if label in {"assets", "liabilities", "cash"}:
-                match = _match_instant(instants, eps_fact.accession, end, names)
+                match = _match_instant(instants, accession, end, names)
             else:
-                match = _match_duration(
-                    durations, eps_fact.accession, start, end, eps_fact.period_kind, names
-                )
+                match = _match_duration(durations, accession, start, end, period_kind, names)
             if match is not None:
                 metrics.append((label, match.value))
         statements.append(
@@ -630,13 +653,26 @@ def _statements_from_facts(
                 book_value_per_share=equity.value / shares.value,
                 metrics=tuple(metrics),
                 cik=cik,
-                accession=eps_fact.accession,
+                accession=accession,
                 form_type=eps_fact.form_type,
-                period_kind=eps_fact.period_kind,
+                period_kind=period_kind,
                 period_start=eps_fact.period_start,
             )
         )
     return statements, gaps
+
+
+def _statement_sort_key(
+    key: tuple[str, str, date | None, date, str],
+) -> tuple[str, str, str, str, str]:
+    symbol, accession, start, end, period_kind = key
+    return (
+        symbol,
+        accession,
+        start.isoformat() if start is not None else "",
+        end.isoformat(),
+        period_kind,
+    )
 
 
 def _match_instant(
@@ -646,14 +682,14 @@ def _match_instant(
     names: Sequence[str],
 ) -> XbrlFactRecord | None:
     wanted = set(names)
-    for fact in facts:
-        if (
-            fact.accession == accession
-            and fact.concept in wanted
-            and fact.time.event_time.date() == end
-        ):
-            return fact
-    return None
+    matches = [
+        fact
+        for fact in facts
+        if fact.accession == accession
+        and fact.concept in wanted
+        and fact.time.event_time.date() == end
+    ]
+    return _require_consistent_value(matches, ",".join(names))
 
 
 def _match_duration(
@@ -665,6 +701,7 @@ def _match_duration(
     names: Sequence[str],
 ) -> XbrlFactRecord | None:
     wanted = set(names)
+    matches = []
     for fact in facts:
         fact_start = fact.period_start.date() if fact.period_start is not None else None
         if (
@@ -674,8 +711,21 @@ def _match_duration(
             and fact_start == start
             and fact.period_kind == period_kind
         ):
-            return fact
-    return None
+            matches.append(fact)
+    return _require_consistent_value(matches, ",".join(names))
+
+
+def _require_consistent_value(facts: Sequence[XbrlFactRecord], label: str) -> XbrlFactRecord | None:
+    if not facts:
+        return None
+    ordered = sorted(facts, key=_fact_sort_key)
+    first = ordered[0]
+    for fact in ordered[1:]:
+        if fact.value != first.value:
+            raise EdgarIntegrityError(
+                f"conflicting {label} observations for accession {first.accession}"
+            )
+    return first
 
 
 def _fact_sort_key(fact: XbrlFactRecord) -> tuple[Any, ...]:
@@ -848,6 +898,10 @@ def _ingest_metadata(
         "intraday_eligible_facts": sum(1 for item in facts if item.intraday_eligible),
         "fact_coverage": dict(fact_coverage),
         "incomplete_statements": list(statement_gaps),
+        "statement_identity": (
+            "One summary per symbol, accession, period_start, period_end, and period_kind. "
+            "Diluted EPS is preferred for earnings_per_share; basic and diluted facts are kept."
+        ),
         "query_bounds": {
             "max_filings": query.max_filings,
             "max_facts": query.max_facts,

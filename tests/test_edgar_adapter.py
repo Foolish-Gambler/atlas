@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
@@ -9,6 +10,7 @@ import pytest
 
 from atlas.backtesting.view import build_view
 from atlas.contracts import EventClock
+from atlas.ingest.codec import statement_file_stem
 from atlas.ingest.edgar import (
     EdgarIntegrityError,
     EdgarQuery,
@@ -104,7 +106,11 @@ def test_ticker_cik_filings_and_xbrl_roundtrip(edgar_env: None, tmp_path: Path) 
     assert all(fact.unit == "USD/shares" for fact in eps)
     assert result.manifest.metadata["fact_coverage"]["unit_mismatch_rows"] >= 1
     assert result.statements
-    annual_stmt = next(item for item in result.statements if item.period_kind == "duration_annual")
+    annual_stmt = next(
+        item
+        for item in result.statements
+        if item.accession == "0000320193-23-000106" and item.period_kind == "duration_annual"
+    )
     assert annual_stmt.earnings_per_share == 6.13
     assert annual_stmt.book_value_per_share == pytest.approx(62146000000 / 15550061000)
     assert dict(annual_stmt.metrics)["revenue"] == 383285000000
@@ -261,3 +267,85 @@ def test_max_facts_truncates_newest_first(edgar_env: None, tmp_path: Path) -> No
     assert coverage["stored_facts"] == 3
     assert coverage["omitted_facts"] > 0
     assert all(fact.unit in {"USD", "USD/shares", "shares"} for fact in result.facts)
+
+
+def test_basic_diluted_and_multi_period_statements_use_unique_filenames(
+    edgar_env: None, tmp_path: Path
+) -> None:
+    store = SnapshotStore(tmp_path)
+    result = adapter_for_tests(_handler()).ingest(
+        store,
+        dataset_id="edgar-eps",
+        revision="1",
+        query=EdgarQuery(symbol="AAPL"),
+    )
+    basic = [fact for fact in result.facts if fact.concept == "EarningsPerShareBasic"]
+    diluted = [fact for fact in result.facts if fact.concept == "EarningsPerShareDiluted"]
+    assert basic
+    assert diluted
+    coverage = result.manifest.metadata["fact_coverage"]
+    assert coverage["duplicate_fact_rows"] >= 1
+    original = next(
+        item
+        for item in result.statements
+        if item.accession == "0000320193-23-000106" and item.period_kind == "duration_annual"
+    )
+    assert original.earnings_per_share == 6.13
+    collision = [item for item in result.statements if item.accession == "0000320193-26-000020"]
+    kinds = {item.period_kind for item in collision}
+    assert kinds == {"duration_quarter", "duration_ytd"}
+    quarter = next(item for item in collision if item.period_kind == "duration_quarter")
+    ytd = next(item for item in collision if item.period_kind == "duration_ytd")
+    assert quarter.earnings_per_share == 1.57
+    assert ytd.earnings_per_share == 4.96
+    assert quarter.period_start != ytd.period_start
+    assert dict(quarter.metrics)["revenue"] == 94036000000
+    assert dict(ytd.metrics)["revenue"] == 260000000000
+    stems = [statement_file_stem(item) for item in result.statements]
+    assert len(stems) == len(set(stems))
+    assert "AAPL-20260329-20260627-duration_quarter-0000320193-26-000020" in stems
+    assert "AAPL-20250928-20260627-duration_ytd-0000320193-26-000020" in stems
+    assert not any(stem == "AAPL-20260627-0000320193-26-000020" for stem in stems)
+    files = store.load("edgar-eps", "1").manifest.files
+    statement_files = [name for name in files if name.startswith("statements/")]
+    assert len(statement_files) == len(result.statements)
+    amendment_eps = [
+        fact
+        for fact in result.facts
+        if fact.concept == "EarningsPerShareDiluted" and fact.accession == "0000320193-23-000077"
+    ]
+    assert amendment_eps
+    assert amendment_eps[0].value == 6.14
+    assert all(item.accession != "0000320193-23-000077" for item in result.statements)
+
+
+def test_conflicting_xbrl_observation_rejects_without_partial_revision(
+    edgar_env: None, tmp_path: Path
+) -> None:
+    payload = deepcopy(FIXTURE)
+    rows = payload["companyfacts"]["facts"]["us-gaap"]["EarningsPerShareDiluted"]["units"][
+        "USD/shares"
+    ]
+    conflict = dict(rows[0])
+    conflict["val"] = 99.99
+    rows.insert(1, conflict)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("company_tickers.json"):
+            return httpx.Response(200, json=payload["tickers"])
+        if "/submissions/" in request.url.path:
+            return httpx.Response(200, json=payload["submissions"])
+        if "/companyfacts/" in request.url.path:
+            return httpx.Response(200, json=payload["companyfacts"])
+        return httpx.Response(404, json={"error": request.url.path})
+
+    store = SnapshotStore(tmp_path)
+    with pytest.raises(EdgarIntegrityError, match="conflicting XBRL observation"):
+        adapter_for_tests(handler).ingest(
+            store,
+            dataset_id="edgar-conflict",
+            revision="1",
+            query=EdgarQuery(symbol="AAPL"),
+        )
+    assert not (tmp_path / "edgar-conflict" / "1").exists()
+    assert not list(tmp_path.rglob("manifest.json"))

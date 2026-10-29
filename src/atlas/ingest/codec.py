@@ -272,14 +272,24 @@ def parse_fact(
     )
 
 
+def statement_identity(statement: StatementRecord) -> tuple[str, str, str, str, str]:
+    start = (
+        statement.period_start.date().isoformat() if statement.period_start is not None else "none"
+    )
+    end = statement.time.event_time.date().isoformat()
+    kind = statement.period_kind or "unknown"
+    accession = statement.accession or "noaccn"
+    return (statement.symbol, accession, start, end, kind)
+
+
+def statement_file_stem(statement: StatementRecord) -> str:
+    symbol, accession, start, end, kind = statement_identity(statement)
+    return f"{symbol}-{start.replace('-', '')}-{end.replace('-', '')}-{kind}-{accession}"
+
+
 def statement_event_id(statement: StatementRecord) -> str:
-    if statement.accession:
-        kind = statement.period_kind or "unknown"
-        return (
-            f"statement:{statement.symbol}:{statement.time.event_time.isoformat()}:"
-            f"{kind}:{statement.accession}"
-        )
-    return f"statement:{statement.symbol}:{statement.time.event_time.isoformat()}"
+    symbol, accession, start, end, kind = statement_identity(statement)
+    return f"statement:{symbol}:{accession}:{start}:{end}:{kind}"
 
 
 def research_to_row(record: ResearchArtifact) -> dict[str, Any]:
