@@ -386,6 +386,17 @@ def test_comparative_shares_use_pit_prior_accession(edgar_env: None, tmp_path: P
     )
     assert comparative.book_value_per_share == pytest.approx(65830000000 / 14856722000)
     assert comparative.book_value_per_share != pytest.approx(65830000000 / 14948179000)
+    waso_only = next(item for item in result.statements if item.accession == "0000320193-24-000200")
+    assert waso_only.book_value_per_share is None
+    assert dict(waso_only.metrics)["weighted_average_diluted_shares"] == 15500000000
+    assert waso_only.book_value_per_share != pytest.approx(70000000000 / 15500000000)
+    waso_fact = next(
+        fact
+        for fact in result.facts
+        if fact.concept == "WeightedAverageNumberOfDilutedSharesOutstanding"
+        and fact.accession == "0000320193-24-000200"
+    )
+    assert waso_fact.value == 15500000000
     loaded = store.load("edgar-pit-shares", "1")
     clock = EventClock(loaded.stream())
     before_prior = datetime(2025, 7, 31, tzinfo=UTC)

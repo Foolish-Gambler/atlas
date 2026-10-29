@@ -102,6 +102,31 @@ def build_parser() -> argparse.ArgumentParser:
         help="Print EDGAR concept coverage and PIT timestamp checks for a snapshot.",
     )
     _add_snapshot_ids(edgar_coverage, require_ids=True)
+    edgar_docs = edgar_sub.add_parser(
+        "ingest-documents-recorded",
+        help="Ingest recorded SEC filing HTML/text. Does not open a network socket.",
+    )
+    _add_snapshot_ids(edgar_docs, require_ids=True)
+    edgar_docs.add_argument("--source-dataset", required=True)
+    edgar_docs.add_argument("--source-revision", required=True)
+    edgar_docs.add_argument("--recorded", required=True, type=Path)
+    edgar_docs.add_argument("--max-documents", type=int, default=8)
+    edgar_inspect_docs = edgar_sub.add_parser(
+        "inspect-documents",
+        help="Print filing-document metadata and cleaned-text chunk locations.",
+    )
+    _add_snapshot_ids(edgar_inspect_docs, require_ids=True)
+    edgar_inspect_docs.add_argument("--accession", default=None)
+    edgar_fetch_docs = edgar_sub.add_parser(
+        "fetch-documents-once",
+        help="One-off read-only SEC archive GET. Requires ATLAS_ALLOW_NETWORK.",
+    )
+    _add_snapshot_ids(edgar_fetch_docs, require_ids=True)
+    edgar_fetch_docs.add_argument("--source-dataset", required=True)
+    edgar_fetch_docs.add_argument("--source-revision", required=True)
+    edgar_fetch_docs.add_argument("--max-documents", type=int, default=1)
+    edgar_fetch_docs.add_argument("--max-bytes", type=int, default=8_000_000)
+    edgar_fetch_docs.add_argument("--max-requests", type=int, default=4)
 
     paper = subparsers.add_parser("paper", help="Paper-only virtual portfolio helpers.")
     paper_sub = paper.add_subparsers(dest="paper_command", required=True)
@@ -318,6 +343,120 @@ def _edgar_command(args: argparse.Namespace) -> int:
     )
     from atlas.ingest.http import network_allowed
 
+    if args.edgar_command == "ingest-documents-recorded":
+        from atlas.ingest.filing_docs import (
+            RETRIEVAL_MOCKED_HTTP as DOC_MOCKED,
+        )
+        from atlas.ingest.filing_docs import (
+            FilingDocumentQuery,
+            FilingDocumentsAdapter,
+        )
+
+        recorded = json.loads(Path(args.recorded).read_text(encoding="utf-8"))
+        pages = recorded.get("documents", recorded)
+        source = SnapshotStore(args.root).load(args.source_dataset, args.source_revision)
+        result = FilingDocumentsAdapter(user_agent="ATLAS-offline-reprocess", allow_network=False)
+        created = result.ingest_from_source(
+            SnapshotStore(args.root),
+            source,
+            dataset_id=args.dataset,
+            revision=args.revision,
+            query=FilingDocumentQuery(max_documents=args.max_documents),
+            retrieval_mode=DOC_MOCKED,
+            recorded=pages,
+        )
+        print(
+            json.dumps(
+                {
+                    "status": "created",
+                    "dataset_id": created.manifest.dataset_id,
+                    "revision": created.manifest.revision,
+                    "documents": len(created.documents),
+                    "chunks": len(created.chunks),
+                    "retrieval_mode": created.retrieval_mode,
+                    "http": False,
+                    "content_trust": "untrusted_sec_document",
+                },
+                indent=2,
+            )
+        )
+        return 0
+    if args.edgar_command == "inspect-documents":
+        source = SnapshotStore(args.root).load(args.dataset, args.revision)
+        docs = [
+            {
+                "accession": item.accession,
+                "sha256": item.sha256,
+                "source_url": item.source_url,
+                "byte_length": item.byte_length,
+                "mime_type": item.mime_type,
+                "acceptance_verified": item.acceptance_verified,
+                "intraday_eligible": item.intraday_eligible,
+                "untrusted": True,
+            }
+            for item in source.filing_documents()
+            if args.accession is None or item.accession == args.accession
+        ]
+        chunks = [
+            {
+                "chunk_id": item.chunk_id,
+                "accession": item.accession,
+                "section_heading": item.section_heading,
+                "text_start": item.text_start,
+                "text_end": item.text_end,
+                "offset_kind": item.offset_kind,
+                "raw_byte_start": item.raw_byte_start,
+                "raw_byte_end": item.raw_byte_end,
+                "untrusted": True,
+            }
+            for item in source.filing_text_chunks()
+            if args.accession is None or item.accession == args.accession
+        ]
+        print(json.dumps({"documents": docs, "chunks": chunks}, indent=2))
+        return 0
+    if args.edgar_command == "fetch-documents-once":
+        from atlas.ingest.filing_docs import (
+            RETRIEVAL_VENDOR_GET as DOC_GET,
+        )
+        from atlas.ingest.filing_docs import (
+            FilingDocumentQuery,
+            FilingDocumentsAdapter,
+        )
+
+        if not network_allowed():
+            raise NetworkDisabledError(
+                "atlas edgar fetch-documents-once requires ATLAS_ALLOW_NETWORK=1 "
+                "after explicit approval."
+            )
+        source = SnapshotStore(args.root).load(args.source_dataset, args.source_revision)
+        created = FilingDocumentsAdapter().ingest_from_source(
+            SnapshotStore(args.root),
+            source,
+            dataset_id=args.dataset,
+            revision=args.revision,
+            query=FilingDocumentQuery(
+                max_documents=args.max_documents,
+                max_bytes=args.max_bytes,
+                max_requests=args.max_requests,
+            ),
+            retrieval_mode=DOC_GET,
+        )
+        print(
+            json.dumps(
+                {
+                    "status": "created",
+                    "dataset_id": created.manifest.dataset_id,
+                    "revision": created.manifest.revision,
+                    "documents": len(created.documents),
+                    "chunks": len(created.chunks),
+                    "retrieval_mode": created.retrieval_mode,
+                    "http": True,
+                    "content_trust": "untrusted_sec_document",
+                },
+                indent=2,
+            )
+        )
+        return 0
     if args.edgar_command == "reprocess":
         from atlas.ingest.edgar import EdgarAdapter
 

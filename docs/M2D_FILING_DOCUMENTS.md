@@ -1,36 +1,50 @@
 # M2-D — Filing document ingest for LLM research
 
-Design only for this milestone. No live HTTP, no LLM calls, and no execution path in this document.
+Implemented as GET-only archive ingest. No live HTTP in CI, no LLM calls, and no execution path.
 
 ## Goal
 
-Attach the **primary filing document** (10-K / 10-Q / 8-K HTML or text) to the same immutable SnapshotStore revision model used by M2-C companyfacts. M3 research agents may cite byte ranges in those documents. They must not create orders.
+Attach the **primary filing document** (10-K / 10-Q / 8-K HTML or text) to a **new** immutable SnapshotStore revision. M3 research agents may cite document hashes and cleaned-text offsets. They must not create orders.
 
 ## Inputs (read-only)
 
-- Already stored `FilingRecord.primary_document` and accession from submissions JSON.
-- SEC archives host, GET only, same User-Agent and `ATLAS_ALLOW_NETWORK` gate as M2-C.
-- Default sleep under SEC fair-access guidance. Hard request bound per revision.
+- `FilingRecord.cik`, `accession`, `primary_document` from an existing snapshot.
+- Canonical URL: `https://www.sec.gov/Archives/edgar/data/{cik}/{accession-without-dashes}/{basename}`
+- Same User-Agent and `ATLAS_ALLOW_NETWORK` gate as M2-C. Redirects are rejected.
 
 ## Outputs
 
 ```text
 {root}/{dataset}/{revision}/
-  filings/{accession}.json          # existing metadata
-  filing-docs/{accession}/{name}    # raw bytes, hashed in manifest
+  filings/{accession}.json
+  filing-docs/{accession}/{name}     # original bytes
+  filing-docs/{accession}/document.json
+  filing-text/{accession}.jsonl      # untrusted cleaned-text chunks
 ```
 
-Each document record needs `TimeIndex` (event = period end or 8-K acceptance; available = verified acceptance), provenance, SHA-256, source URL, content type, and byte length. Do not extract financials from HTML and present them as XBRL.
+Each document keeps source URL, SHA-256, MIME type, length, retrieval time, accession, provenance, and the filing's PIT timestamps. Unverified acceptances stay `intraday_eligible=false`.
+
+HTML is converted with the standard library. Tables and `Item` headings are preserved in cleaned text. `offset_kind=raw_bytes` is set only when a chunk maps uniquely into the original bytes. Otherwise citations use `cleaned_text` offsets. Offsets are never invented.
+
+Extracted text is prefixed with `UNTRUSTED_SEC_DOCUMENT` and must not be treated as model instructions.
+
+## CLI
+
+```text
+atlas edgar ingest-documents-recorded --root DIR --dataset NEW --revision NEW \
+  --source-dataset SRC --source-revision SRC_REV --recorded pages.json
+atlas edgar inspect-documents --root DIR --dataset ID --revision REV [--accession ACCN]
+atlas edgar fetch-documents-once --root DIR --dataset NEW --revision NEW \
+  --source-dataset SRC --source-revision SRC_REV
+```
+
+`fetch-documents-once` requires `ATLAS_ALLOW_NETWORK=1` and never overwrites an existing revision (including `aapl-edgar-real/2026-10-28-01`).
 
 ## LLM boundary (M3)
 
 - Worker consumes filing-docs + XBRL facts already in the snapshot.
-- Emits `ResearchArtifact` with `evidence_refs` pointing at `filing:{accession}` and optional `byte_start:byte_end`.
-- Forbidden: `Signal` auto-approve, `PaperBroker.submit`, live brokerage, inventing missing exhibits.
-
-## Offline first
-
-Record archive responses as fixtures. `atlas edgar reprocess` must rebuild metadata without re-fetching documents unless a new revision explicitly requests them. Never overwrite `aapl-edgar-real/2026-10-28-01`.
+- Emits `ResearchArtifact` with `evidence_refs` pointing at `filing-doc:{accession}:{sha256}` and optional cleaned-text offsets.
+- Forbidden: `Signal` auto-approve, `PaperBroker.submit`, live brokerage, inventing missing exhibits or offsets.
 
 ## Out of scope
 

@@ -15,7 +15,9 @@ from uuid import uuid4
 
 from atlas.contracts import (
     EnsemblePrediction,
+    FilingDocumentRecord,
     FilingRecord,
+    FilingTextChunk,
     MarketBarRecord,
     NewsRecord,
     Provenance,
@@ -33,12 +35,16 @@ from atlas.ingest.codec import (
     dumps_canonical,
     ensemble_to_row,
     fact_to_row,
+    filing_chunk_to_row,
+    filing_document_to_row,
     filing_to_row,
     news_to_row,
     parse_bar,
     parse_ensemble,
     parse_fact,
     parse_filing,
+    parse_filing_chunk,
+    parse_filing_document,
     parse_news,
     parse_prediction,
     parse_research,
@@ -83,6 +89,9 @@ class SnapshotPayload:
     predictions: tuple[ReturnPrediction, ...] = ()
     ensembles: tuple[EnsemblePrediction, ...] = ()
     facts: tuple[XbrlFactRecord, ...] = ()
+    filing_documents: tuple[FilingDocumentRecord, ...] = ()
+    filing_text_chunks: tuple[FilingTextChunk, ...] = ()
+    filing_document_bytes: dict[str, bytes] = field(default_factory=dict)
     vendor_raw: tuple[dict[str, Any], ...] = ()
 
 
@@ -143,6 +152,9 @@ class SnapshotSource:
         self._predictions = payload.predictions
         self._ensembles = payload.ensembles
         self._facts = payload.facts
+        self._filing_documents = payload.filing_documents
+        self._filing_text_chunks = payload.filing_text_chunks
+        self._filing_document_bytes = dict(payload.filing_document_bytes)
         self._vendor_raw = payload.vendor_raw
         self._by_ref = {bar.ref_id: bar for bar in self._bars}
         self._events = build_stream(
@@ -154,6 +166,8 @@ class SnapshotSource:
             self._predictions,
             self._ensembles,
             self._facts,
+            self._filing_documents,
+            self._filing_text_chunks,
         )
 
     def bars(self, symbol: str) -> Sequence[MarketBarRecord]:
@@ -183,6 +197,18 @@ class SnapshotSource:
 
     def facts(self) -> tuple[XbrlFactRecord, ...]:
         return self._facts
+
+    def filing_documents(self) -> tuple[FilingDocumentRecord, ...]:
+        return self._filing_documents
+
+    def filing_text_chunks(self) -> tuple[FilingTextChunk, ...]:
+        return self._filing_text_chunks
+
+    def filing_document_bytes(self, ref_id: str) -> bytes:
+        try:
+            return self._filing_document_bytes[ref_id]
+        except KeyError as exc:
+            raise InvalidInputError(f"unknown filing document {ref_id!r}") from exc
 
     def vendor_raw(self) -> tuple[dict[str, Any], ...]:
         return self._vendor_raw
@@ -354,6 +380,12 @@ def _stamp_payload(payload: SnapshotPayload, ingested: datetime) -> SnapshotPayl
         replace(item, time=_stamp_time(item.time, ingested)) for item in payload.ensembles
     )
     facts = tuple(replace(item, time=_stamp_time(item.time, ingested)) for item in payload.facts)
+    filing_documents = tuple(
+        replace(item, time=_stamp_time(item.time, ingested)) for item in payload.filing_documents
+    )
+    filing_text_chunks = tuple(
+        replace(item, time=_stamp_time(item.time, ingested)) for item in payload.filing_text_chunks
+    )
     return SnapshotPayload(
         bars=bars,
         filings=filings,
@@ -363,6 +395,9 @@ def _stamp_payload(payload: SnapshotPayload, ingested: datetime) -> SnapshotPayl
         predictions=predictions,
         ensembles=ensembles,
         facts=facts,
+        filing_documents=filing_documents,
+        filing_text_chunks=filing_text_chunks,
+        filing_document_bytes=dict(payload.filing_document_bytes),
         vendor_raw=payload.vendor_raw,
     )
 
@@ -416,6 +451,30 @@ def _write_payload(
         for symbol, rows in sorted(by_fact_symbol.items()):
             rel = f"facts/{symbol}.jsonl"
             files[rel] = _write_jsonl(root / rel, [fact_to_row(item) for item in rows])
+    if payload.filing_documents:
+        (root / "filing-docs").mkdir()
+        for document in payload.filing_documents:
+            accn = _safe_file_stem(document.accession, "accession")
+            name = _safe_file_stem(document.primary_document, "primary_document")
+            folder = root / "filing-docs" / accn
+            folder.mkdir(parents=True, exist_ok=True)
+            raw_rel = f"filing-docs/{accn}/{name}"
+            body = payload.filing_document_bytes.get(document.ref_id, b"")
+            files[raw_rel] = _write_bytes(folder / name, body)
+            meta_rel = f"filing-docs/{accn}/document.json"
+            files[meta_rel] = _write_bytes(
+                folder / "document.json",
+                dumps_canonical({**filing_document_to_row(document), "raw_path": raw_rel}),
+            )
+    if payload.filing_text_chunks:
+        (root / "filing-text").mkdir()
+        by_accn: dict[str, list[FilingTextChunk]] = {}
+        for chunk in payload.filing_text_chunks:
+            by_accn.setdefault(chunk.accession, []).append(chunk)
+        for accession, rows in sorted(by_accn.items()):
+            stem = _safe_file_stem(accession, "accession")
+            rel = f"filing-text/{stem}.jsonl"
+            files[rel] = _write_jsonl(root / rel, [filing_chunk_to_row(item) for item in rows])
     if payload.vendor_raw:
         (root / "vendor").mkdir()
         rel = "vendor/raw_bars.jsonl"
@@ -430,6 +489,8 @@ def _write_payload(
         "predictions": len(payload.predictions),
         "ensembles": len(payload.ensembles),
         "facts": len(payload.facts),
+        "filing_documents": len(payload.filing_documents),
+        "filing_text_chunks": len(payload.filing_text_chunks),
         "vendor_raw": len(payload.vendor_raw),
     }
     symbols = tuple(
@@ -440,6 +501,7 @@ def _write_payload(
                 *(item.symbol for item in payload.news),
                 *(item.symbol for item in payload.statements),
                 *(item.symbol for item in payload.facts),
+                *(item.symbol for item in payload.filing_documents),
             }
         )
     )
@@ -562,6 +624,9 @@ def _read_payload(path: Path, manifest: SnapshotManifest) -> SnapshotPayload:
     predictions: list[ReturnPrediction] = []
     ensembles: list[EnsemblePrediction] = []
     facts: list[XbrlFactRecord] = []
+    filing_documents: list[FilingDocumentRecord] = []
+    filing_text_chunks: list[FilingTextChunk] = []
+    filing_document_bytes: dict[str, bytes] = {}
     vendor_raw: list[dict[str, Any]] = []
     parsers = {
         "bars": lambda file_path: bars.extend(
@@ -588,6 +653,13 @@ def _read_payload(path: Path, manifest: SnapshotManifest) -> SnapshotPayload:
         "facts": lambda file_path: facts.extend(
             parse_fact(row, provenance, require_ingested=True) for row in _load_jsonl(file_path)
         ),
+        "filing-docs": lambda file_path: _load_filing_doc_file(
+            file_path, provenance, filing_documents, filing_document_bytes
+        ),
+        "filing-text": lambda file_path: filing_text_chunks.extend(
+            parse_filing_chunk(row, provenance, require_ingested=True)
+            for row in _load_jsonl(file_path)
+        ),
         "vendor": lambda file_path: vendor_raw.extend(_load_jsonl(file_path)),
     }
     for rel in sorted(manifest.files):
@@ -605,5 +677,25 @@ def _read_payload(path: Path, manifest: SnapshotManifest) -> SnapshotPayload:
         predictions=tuple(predictions),
         ensembles=tuple(ensembles),
         facts=tuple(facts),
+        filing_documents=tuple(filing_documents),
+        filing_text_chunks=tuple(filing_text_chunks),
+        filing_document_bytes=filing_document_bytes,
         vendor_raw=tuple(vendor_raw),
     )
+
+
+def _load_filing_doc_file(
+    file_path: Path,
+    provenance: Provenance,
+    documents: list[FilingDocumentRecord],
+    bodies: dict[str, bytes],
+) -> None:
+    if file_path.name != "document.json":
+        return
+    row = _load_json(file_path)
+    record = parse_filing_document(row, provenance, require_ingested=True)
+    documents.append(record)
+    raw_name = record.primary_document
+    raw_path = file_path.with_name(raw_name)
+    if raw_path.is_file():
+        bodies[record.ref_id] = raw_path.read_bytes()

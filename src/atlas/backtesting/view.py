@@ -8,7 +8,9 @@ from datetime import datetime
 
 from atlas.contracts import (
     EnsemblePrediction,
+    FilingDocumentRecord,
     FilingRecord,
+    FilingTextChunk,
     MarketBarRecord,
     NewsRecord,
     PitReplaySource,
@@ -36,6 +38,8 @@ class MarketView:
     predictions: tuple[ReturnPrediction, ...]
     ensembles: tuple[EnsemblePrediction, ...]
     facts: tuple[XbrlFactRecord, ...] = ()
+    filing_documents: tuple[FilingDocumentRecord, ...] = ()
+    filing_text_chunks: tuple[FilingTextChunk, ...] = ()
 
     def last_bar(self, symbol: str | None = None) -> MarketBarRecord | None:
         rows = self.bars
@@ -88,6 +92,16 @@ def build_view(
             fact
             for fact in source.facts()
             if fact.ref_id in visible_ids and fact.time.available_time <= as_of
+        ),
+        filing_documents=tuple(
+            document
+            for document in source.filing_documents()
+            if document.ref_id in visible_ids and document.time.available_time <= as_of
+        ),
+        filing_text_chunks=tuple(
+            chunk
+            for chunk in source.filing_text_chunks()
+            if chunk.chunk_id in visible_ids and chunk.time.available_time <= as_of
         ),
         research=tuple(
             artifact

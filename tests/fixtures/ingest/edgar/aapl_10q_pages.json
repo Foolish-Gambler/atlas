@@ -1,0 +1,9 @@
+{
+  "documents": {
+    "https://www.sec.gov/Archives/edgar/data/320193/000032019326000020/aapl-20260627.htm": {
+      "status": 200,
+      "headers": {"content-type": "text/html; charset=utf-8"},
+      "body_file": "aapl_10q_excerpt.html"
+    }
+  }
+}

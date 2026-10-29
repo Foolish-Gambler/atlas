@@ -15,6 +15,9 @@ Immutable financial datasets live on local disk. HTTP, credentials, and live bro
   predictions/{prediction_id}.json
   ensembles/{ensemble_id}.json
   facts/{SYMBOL}.jsonl
+  filing-docs/{accession}/{name}
+  filing-docs/{accession}/document.json
+  filing-text/{accession}.jsonl
   vendor/raw_bars.jsonl
 ```
 

@@ -9,7 +9,9 @@ from typing import Any
 
 from atlas.contracts import (
     EnsemblePrediction,
+    FilingDocumentRecord,
     FilingRecord,
+    FilingTextChunk,
     MarketBarRecord,
     NewsRecord,
     Provenance,
@@ -211,7 +213,9 @@ def parse_statement(
         time=require_time_index(row, require_ingested=require_ingested),
         provenance=provenance,
         earnings_per_share=row["earnings_per_share"],
-        book_value_per_share=row["book_value_per_share"],
+        book_value_per_share=(
+            None if row.get("book_value_per_share") is None else row["book_value_per_share"]
+        ),
         metrics=tuple((str(name), float(value)) for name, value in (row.get("metrics") or ())),
         cik=row.get("cik"),
         accession=row.get("accession"),
@@ -375,6 +379,91 @@ def parse_ensemble(
     )
 
 
+def filing_document_to_row(record: FilingDocumentRecord) -> dict[str, Any]:
+    return {
+        "symbol": record.symbol,
+        "accession": record.accession,
+        "cik": record.cik,
+        "form_type": record.form_type,
+        "primary_document": record.primary_document,
+        "source_url": record.source_url,
+        "sha256": record.sha256,
+        "mime_type": record.mime_type,
+        "byte_length": record.byte_length,
+        "encoding": record.encoding,
+        "raw_acceptance": record.raw_acceptance,
+        "acceptance_verified": record.acceptance_verified,
+        "intraday_eligible": record.intraday_eligible,
+        "empty": record.empty,
+        "untrusted": True,
+        "retrieved_at": record.retrieved_at.isoformat(),
+        **time_to_row(record.time),
+    }
+
+
+def parse_filing_document(
+    row: dict[str, Any], provenance: Provenance, *, require_ingested: bool
+) -> FilingDocumentRecord:
+    return FilingDocumentRecord(
+        symbol=row["symbol"],
+        accession=row["accession"],
+        cik=row["cik"],
+        form_type=row["form_type"],
+        primary_document=row["primary_document"],
+        source_url=row["source_url"],
+        sha256=row["sha256"],
+        mime_type=row["mime_type"],
+        byte_length=int(row["byte_length"]),
+        time=require_time_index(row, require_ingested=require_ingested),
+        provenance=provenance,
+        retrieved_at=parse_datetime(row["retrieved_at"], "retrieved_at"),
+        encoding=str(row.get("encoding") or "utf-8"),
+        raw_acceptance=row.get("raw_acceptance"),
+        acceptance_verified=bool(row.get("acceptance_verified", False)),
+        intraday_eligible=bool(row.get("intraday_eligible", False)),
+        empty=bool(row.get("empty", False)),
+    )
+
+
+def filing_chunk_to_row(record: FilingTextChunk) -> dict[str, Any]:
+    return {
+        "chunk_id": record.chunk_id,
+        "accession": record.accession,
+        "document_sha256": record.document_sha256,
+        "source_url": record.source_url,
+        "section_heading": record.section_heading,
+        "text": record.text,
+        "text_start": record.text_start,
+        "text_end": record.text_end,
+        "raw_byte_start": record.raw_byte_start,
+        "raw_byte_end": record.raw_byte_end,
+        "offset_kind": record.offset_kind,
+        "untrusted": True,
+        **time_to_row(record.time),
+    }
+
+
+def parse_filing_chunk(
+    row: dict[str, Any], provenance: Provenance, *, require_ingested: bool
+) -> FilingTextChunk:
+    return FilingTextChunk(
+        chunk_id=row["chunk_id"],
+        accession=row["accession"],
+        document_sha256=row["document_sha256"],
+        source_url=row["source_url"],
+        text=str(row.get("text") or ""),
+        text_start=int(row["text_start"]),
+        text_end=int(row["text_end"]),
+        time=require_time_index(row, require_ingested=require_ingested),
+        provenance=provenance,
+        section_heading=row.get("section_heading"),
+        raw_byte_start=row.get("raw_byte_start"),
+        raw_byte_end=row.get("raw_byte_end"),
+        offset_kind=str(row.get("offset_kind") or "cleaned_text"),
+        untrusted=True,
+    )
+
+
 def dumps_canonical(payload: Any) -> bytes:
     text = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return (text + "\n").encode("utf-8")
@@ -389,6 +478,8 @@ def build_stream(
     predictions: Sequence[ReturnPrediction],
     ensembles: Sequence[EnsemblePrediction],
     facts: Sequence[XbrlFactRecord] = (),
+    filing_documents: Sequence[FilingDocumentRecord] = (),
+    filing_text_chunks: Sequence[FilingTextChunk] = (),
 ) -> tuple[StreamEvent, ...]:
     events: list[StreamEvent] = []
     for bar in bars:
@@ -409,6 +500,16 @@ def build_stream(
         events.append(StreamEvent(event_id, StreamEventType.STATEMENT, statement.time, event_id))
     for fact in facts:
         events.append(StreamEvent(fact.ref_id, StreamEventType.XBRL_FACT, fact.time, fact.ref_id))
+    for document in filing_documents:
+        events.append(
+            StreamEvent(
+                document.ref_id, StreamEventType.FILING_DOCUMENT, document.time, document.ref_id
+            )
+        )
+    for chunk in filing_text_chunks:
+        events.append(
+            StreamEvent(chunk.chunk_id, StreamEventType.FILING_TEXT, chunk.time, chunk.ref_id)
+        )
     for artifact in research:
         events.append(
             StreamEvent(

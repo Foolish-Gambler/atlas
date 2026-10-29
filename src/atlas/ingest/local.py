@@ -9,7 +9,9 @@ from typing import Any
 
 from atlas.contracts import (
     EnsemblePrediction,
+    FilingDocumentRecord,
     FilingRecord,
+    FilingTextChunk,
     MarketBarRecord,
     NewsRecord,
     Provenance,
@@ -106,6 +108,12 @@ class LocalFixtureSource(ReadOnlyBarSource, ReadOnlyEventSource):
 
     def facts(self) -> tuple[XbrlFactRecord, ...]:
         return self._facts
+
+    def filing_documents(self) -> tuple[FilingDocumentRecord, ...]:
+        return ()
+
+    def filing_text_chunks(self) -> tuple[FilingTextChunk, ...]:
+        return ()
 
     def stream(self) -> Sequence[StreamEvent]:
         return self._events

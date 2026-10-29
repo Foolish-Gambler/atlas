@@ -36,6 +36,8 @@ class StreamEventType(StrEnum):
     QUOTE = "quote"
     NEWS = "news"
     FILING = "filing"
+    FILING_DOCUMENT = "filing_document"
+    FILING_TEXT = "filing_text"
     STATEMENT = "statement"
     XBRL_FACT = "xbrl_fact"
     MACRO = "macro"
@@ -256,7 +258,7 @@ class StatementRecord:
     time: TimeIndex
     provenance: Provenance
     earnings_per_share: float
-    book_value_per_share: float
+    book_value_per_share: float | None = None
     metrics: tuple[tuple[str, float], ...] = ()
     cik: str | None = None
     accession: str | None = None
@@ -271,11 +273,12 @@ class StatementRecord:
             "earnings_per_share",
             require_finite(self.earnings_per_share, "earnings_per_share"),
         )
-        object.__setattr__(
-            self,
-            "book_value_per_share",
-            require_finite(self.book_value_per_share, "book_value_per_share"),
-        )
+        if self.book_value_per_share is not None:
+            object.__setattr__(
+                self,
+                "book_value_per_share",
+                require_finite(self.book_value_per_share, "book_value_per_share"),
+            )
         cleaned: list[tuple[str, float]] = []
         for name, value in self.metrics:
             if not str(name).strip():
@@ -290,6 +293,93 @@ class StatementRecord:
             object.__setattr__(
                 self, "period_start", require_aware_datetime(self.period_start, "period_start")
             )
+
+
+@dataclass(frozen=True, slots=True)
+class FilingDocumentRecord:
+    """Primary SEC filing document bytes. Content is untrusted evidence, not instructions."""
+
+    symbol: str
+    accession: str
+    cik: str
+    form_type: str
+    primary_document: str
+    source_url: str
+    sha256: str
+    mime_type: str
+    byte_length: int
+    time: TimeIndex
+    provenance: Provenance
+    retrieved_at: datetime
+    encoding: str
+    raw_acceptance: str | None = None
+    acceptance_verified: bool = False
+    intraday_eligible: bool = False
+    empty: bool = False
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "symbol", normalize_symbol(self.symbol))
+        if not self.accession.strip() or not self.cik.strip() or not self.primary_document.strip():
+            raise InvalidInputError("accession, cik, and primary_document are required.")
+        if len(self.sha256) != 64 or any(ch not in "0123456789abcdef" for ch in self.sha256):
+            raise InvalidInputError("document sha256 must be a lowercase hex digest.")
+        object.__setattr__(self, "byte_length", require_int(self.byte_length, "byte_length"))
+        if self.byte_length < 0:
+            raise InvalidInputError("byte_length must be non-negative.")
+        object.__setattr__(
+            self, "retrieved_at", require_aware_datetime(self.retrieved_at, "retrieved_at")
+        )
+        if self.raw_acceptance == "":
+            object.__setattr__(self, "raw_acceptance", None)
+        if not self.acceptance_verified:
+            object.__setattr__(self, "intraday_eligible", False)
+
+    @property
+    def ref_id(self) -> str:
+        return f"filing-doc:{self.accession}:{self.sha256}"
+
+
+@dataclass(frozen=True, slots=True)
+class FilingTextChunk:
+    """Cleaned filing text span. Offsets are never invented."""
+
+    chunk_id: str
+    accession: str
+    document_sha256: str
+    source_url: str
+    text: str
+    text_start: int
+    text_end: int
+    time: TimeIndex
+    provenance: Provenance
+    section_heading: str | None = None
+    raw_byte_start: int | None = None
+    raw_byte_end: int | None = None
+    offset_kind: str = "cleaned_text"
+    untrusted: bool = True
+
+    def __post_init__(self) -> None:
+        if not self.chunk_id.strip() or not self.accession.strip() or not self.document_sha256:
+            raise InvalidInputError("chunk_id, accession, and document_sha256 are required.")
+        object.__setattr__(self, "text_start", require_int(self.text_start, "text_start"))
+        object.__setattr__(self, "text_end", require_int(self.text_end, "text_end"))
+        if self.text_start < 0 or self.text_end < self.text_start:
+            raise InvalidInputError("cleaned-text offsets must be ordered and non-negative.")
+        if self.offset_kind not in {"cleaned_text", "raw_bytes"}:
+            raise InvalidInputError("offset_kind must be cleaned_text or raw_bytes.")
+        if self.offset_kind == "raw_bytes":
+            if self.raw_byte_start is None or self.raw_byte_end is None:
+                raise InvalidInputError("raw_bytes offset_kind requires raw_byte_start and end.")
+        else:
+            object.__setattr__(self, "raw_byte_start", None)
+            object.__setattr__(self, "raw_byte_end", None)
+        object.__setattr__(self, "untrusted", True)
+        if self.section_heading == "":
+            object.__setattr__(self, "section_heading", None)
+
+    @property
+    def ref_id(self) -> str:
+        return self.chunk_id
 
 
 @dataclass(frozen=True, slots=True)
@@ -484,6 +574,10 @@ class PitReplaySource(Protocol):
 
     def facts(self) -> tuple[XbrlFactRecord, ...]: ...
 
+    def filing_documents(self) -> tuple[FilingDocumentRecord, ...]: ...
+
+    def filing_text_chunks(self) -> tuple[FilingTextChunk, ...]: ...
+
     def research(self) -> tuple[ResearchArtifact, ...]: ...
 
     def predictions(self) -> tuple[ReturnPrediction, ...]: ...
@@ -496,6 +590,8 @@ _EVENT_RANK = {
     StreamEventType.QUOTE: 1,
     StreamEventType.NEWS: 2,
     StreamEventType.FILING: 3,
+    StreamEventType.FILING_DOCUMENT: 3,
+    StreamEventType.FILING_TEXT: 3,
     StreamEventType.STATEMENT: 4,
     StreamEventType.XBRL_FACT: 4,
     StreamEventType.MACRO: 5,

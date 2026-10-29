@@ -673,7 +673,6 @@ def _select_facts(
     ordered = list(kept)
     pinned: dict[str, XbrlFactRecord] = {}
     instants = [fact for fact in ordered if fact.period_kind == "instant"]
-    durations = [fact for fact in ordered if fact.period_kind in _STATEMENT_PERIODS]
     grouped = _eps_groups(ordered)
     groups_newest = sorted(
         grouped.items(),
@@ -689,7 +688,6 @@ def _select_facts(
         eps_fact = _require_consistent_value(diluted or basic, "earnings_per_share")
         if eps_fact is None:
             continue
-        start = eps_fact.period_start.date() if eps_fact.period_start is not None else None
         end = eps_fact.time.event_time.date()
         for item in (
             eps_fact,
@@ -700,13 +698,12 @@ def _select_facts(
                 names=_CONCEPT_ALIASES["equity"],
                 as_of=eps_fact.time.available_time,
             ),
-            _match_shares(
+            _match_instant(
                 instants,
-                durations,
-                eps_fact,
-                start=start,
+                accession=eps_fact.accession,
                 end=end,
-                period_kind=eps_fact.period_kind,
+                names=_CONCEPT_ALIASES["shares"],
+                as_of=eps_fact.time.available_time,
             ),
         ):
             if item is not None:
@@ -791,15 +788,29 @@ def _statements_from_facts(
             names=_CONCEPT_ALIASES["equity"],
             as_of=eps_fact.time.available_time,
         )
-        shares = _match_shares(
+        period_end_shares = _match_instant(
             instants,
-            durations,
-            eps_fact,
-            start=start,
+            accession=accession,
             end=end,
-            period_kind=period_kind,
+            names=_CONCEPT_ALIASES["shares"],
+            as_of=eps_fact.time.available_time,
         )
-        if equity is None or shares is None or shares.value == 0:
+        weighted = _match_duration(
+            durations,
+            accession,
+            start,
+            end,
+            period_kind,
+            (
+                _CONCEPT_ALIASES["weighted_shares_diluted"]
+                if eps_fact.concept in _EPS_DILUTED
+                else _CONCEPT_ALIASES["weighted_shares_basic"]
+            ),
+        )
+        book_value: float | None = None
+        if equity is not None and period_end_shares is not None and period_end_shares.value != 0:
+            book_value = equity.value / period_end_shares.value
+        elif equity is None or period_end_shares is None:
             gaps.append(
                 {
                     "accession": accession,
@@ -808,13 +819,17 @@ def _statements_from_facts(
                     "period_kind": period_kind,
                     "missing": [
                         name
-                        for name, present in (("equity", equity), ("shares", shares))
+                        for name, present in (
+                            ("equity", equity),
+                            ("period_end_shares", period_end_shares),
+                        )
                         if present is None
                     ],
                     "reason": "incomplete_ratio_inputs",
+                    "weighted_average_shares_present": weighted is not None,
+                    "book_value_per_share": None,
                 }
             )
-            continue
         metrics: list[tuple[str, float]] = []
         for label, names in _CONCEPT_ALIASES.items():
             if label in {
@@ -838,13 +853,20 @@ def _statements_from_facts(
                 match = _match_duration(durations, accession, start, end, period_kind, names)
             if match is not None:
                 metrics.append((label, match.value))
+        if weighted is not None:
+            metric_name = (
+                "weighted_average_diluted_shares"
+                if eps_fact.concept in _EPS_DILUTED
+                else "weighted_average_basic_shares"
+            )
+            metrics.append((metric_name, weighted.value))
         statements.append(
             StatementRecord(
                 symbol=symbol,
                 time=eps_fact.time,
                 provenance=provenance,
                 earnings_per_share=eps_fact.value,
-                book_value_per_share=equity.value / shares.value,
+                book_value_per_share=book_value,
                 metrics=tuple(metrics),
                 cik=cik,
                 accession=accession,
@@ -867,32 +889,6 @@ def _statement_sort_key(
         end.isoformat(),
         period_kind,
     )
-
-
-def _match_shares(
-    instants: Sequence[XbrlFactRecord],
-    durations: Sequence[XbrlFactRecord],
-    eps_fact: XbrlFactRecord,
-    *,
-    start: date | None,
-    end: date,
-    period_kind: str,
-) -> XbrlFactRecord | None:
-    shares = _match_instant(
-        instants,
-        accession=eps_fact.accession,
-        end=end,
-        names=_CONCEPT_ALIASES["shares"],
-        as_of=eps_fact.time.available_time,
-    )
-    if shares is not None:
-        return shares
-    weighted = (
-        _CONCEPT_ALIASES["weighted_shares_diluted"]
-        if eps_fact.concept in _EPS_DILUTED
-        else _CONCEPT_ALIASES["weighted_shares_basic"]
-    )
-    return _match_duration(durations, eps_fact.accession, start, end, period_kind, weighted)
 
 
 def _match_instant(
