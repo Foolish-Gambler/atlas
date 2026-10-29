@@ -312,10 +312,12 @@ class FilingDocumentRecord:
     provenance: Provenance
     retrieved_at: datetime
     encoding: str
+    cleaned_text: str = ""
     raw_acceptance: str | None = None
     acceptance_verified: bool = False
     intraday_eligible: bool = False
     empty: bool = False
+    content_trust: str = "untrusted_sec_document"
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "symbol", normalize_symbol(self.symbol))
@@ -333,6 +335,8 @@ class FilingDocumentRecord:
             object.__setattr__(self, "raw_acceptance", None)
         if not self.acceptance_verified:
             object.__setattr__(self, "intraday_eligible", False)
+        object.__setattr__(self, "content_trust", "untrusted_sec_document")
+        object.__setattr__(self, "empty", not self.cleaned_text.strip() or self.byte_length == 0)
 
     @property
     def ref_id(self) -> str:
@@ -365,6 +369,8 @@ class FilingTextChunk:
         object.__setattr__(self, "text_end", require_int(self.text_end, "text_end"))
         if self.text_start < 0 or self.text_end < self.text_start:
             raise InvalidInputError("cleaned-text offsets must be ordered and non-negative.")
+        if len(self.text) != self.text_end - self.text_start:
+            raise InvalidInputError("chunk text length must match cleaned-text offsets.")
         if self.offset_kind not in {"cleaned_text", "raw_bytes"}:
             raise InvalidInputError("offset_kind must be cleaned_text or raw_bytes.")
         if self.offset_kind == "raw_bytes":

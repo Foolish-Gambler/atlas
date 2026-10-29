@@ -391,10 +391,12 @@ def filing_document_to_row(record: FilingDocumentRecord) -> dict[str, Any]:
         "mime_type": record.mime_type,
         "byte_length": record.byte_length,
         "encoding": record.encoding,
+        "cleaned_text": record.cleaned_text,
         "raw_acceptance": record.raw_acceptance,
         "acceptance_verified": record.acceptance_verified,
         "intraday_eligible": record.intraday_eligible,
         "empty": record.empty,
+        "content_trust": record.content_trust,
         "untrusted": True,
         "retrieved_at": record.retrieved_at.isoformat(),
         **time_to_row(record.time),
@@ -418,10 +420,12 @@ def parse_filing_document(
         provenance=provenance,
         retrieved_at=parse_datetime(row["retrieved_at"], "retrieved_at"),
         encoding=str(row.get("encoding") or "utf-8"),
+        cleaned_text=str(row.get("cleaned_text") or ""),
         raw_acceptance=row.get("raw_acceptance"),
         acceptance_verified=bool(row.get("acceptance_verified", False)),
         intraday_eligible=bool(row.get("intraday_eligible", False)),
         empty=bool(row.get("empty", False)),
+        content_trust=str(row.get("content_trust") or "untrusted_sec_document"),
     )
 
 

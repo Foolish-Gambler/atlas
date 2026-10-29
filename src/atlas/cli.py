@@ -127,6 +127,11 @@ def build_parser() -> argparse.ArgumentParser:
     edgar_fetch_docs.add_argument("--max-documents", type=int, default=1)
     edgar_fetch_docs.add_argument("--max-bytes", type=int, default=8_000_000)
     edgar_fetch_docs.add_argument("--max-requests", type=int, default=4)
+    edgar_fetch_docs.add_argument(
+        "--accession",
+        default=None,
+        help="Fetch this accession only. Fails if it is missing from the source snapshot.",
+    )
 
     paper = subparsers.add_parser("paper", help="Paper-only virtual portfolio helpers.")
     paper_sub = paper.add_subparsers(dest="paper_command", required=True)
@@ -393,6 +398,7 @@ def _edgar_command(args: argparse.Namespace) -> int:
                 "acceptance_verified": item.acceptance_verified,
                 "intraday_eligible": item.intraday_eligible,
                 "untrusted": True,
+                "content_trust": item.content_trust,
             }
             for item in source.filing_documents()
             if args.accession is None or item.accession == args.accession
@@ -438,6 +444,8 @@ def _edgar_command(args: argparse.Namespace) -> int:
                 max_documents=args.max_documents,
                 max_bytes=args.max_bytes,
                 max_requests=args.max_requests,
+                accession=args.accession,
+                require_success=True,
             ),
             retrieval_mode=DOC_GET,
         )
@@ -448,6 +456,7 @@ def _edgar_command(args: argparse.Namespace) -> int:
                     "dataset_id": created.manifest.dataset_id,
                     "revision": created.manifest.revision,
                     "documents": len(created.documents),
+                    "accessions": [item.accession for item in created.documents],
                     "chunks": len(created.chunks),
                     "retrieval_mode": created.retrieval_mode,
                     "http": True,

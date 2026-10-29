@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from atlas.cli import main
+from atlas.cli import build_parser, main
 
 ALPACA_MIN = Path(__file__).parent / "fixtures" / "ingest" / "alpaca" / "aapl_1min_pages.json"
 EDGAR_PAGES = Path(__file__).parent / "fixtures" / "ingest" / "edgar" / "aapl_pages.json"
@@ -265,3 +265,26 @@ def test_edgar_recorded_ingest_and_fetch_once_blocked(tmp_path: Path, capsys, mo
         )
         == 2
     )
+
+
+def test_fetch_documents_once_parser_accepts_accession() -> None:
+    args = build_parser().parse_args(
+        [
+            "edgar",
+            "fetch-documents-once",
+            "--root",
+            "snapshots",
+            "--dataset",
+            "edgar-docs",
+            "--revision",
+            "1",
+            "--source-dataset",
+            "edgar-aapl",
+            "--source-revision",
+            "meta-1",
+            "--accession",
+            "0000320193-26-000020",
+        ]
+    )
+    assert args.accession == "0000320193-26-000020"
+    assert args.max_documents == 1

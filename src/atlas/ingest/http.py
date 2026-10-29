@@ -115,3 +115,81 @@ class ReadOnlyHttp:
                 raise ReadOnlyHttpError(f"HTTP {response.status_code} from {parsed.path}")
             return response
         raise ReadOnlyHttpError(f"GET failed after {self.max_retries} attempts") from last_error
+
+    def get_bounded(
+        self,
+        url: str,
+        *,
+        max_bytes: int,
+        headers: Mapping[str, str] | None = None,
+    ) -> httpx.Response:
+        """GET a body of at most max_bytes. Extra bytes are neither retained nor returned."""
+        if max_bytes < 1:
+            raise ReadOnlyHttpError("max_bytes must be positive.")
+        parsed = urlparse(url)
+        host = parsed.hostname or ""
+        path = parsed.path.lower()
+        if host in _BLOCKED_HOSTS or "/orders" in path or "/v2/account" in path:
+            raise ReadOnlyHttpError("trading and account endpoints are forbidden.")
+        if parsed.scheme != "https" or host not in self.allowed_hosts:
+            raise ReadOnlyHttpError(f"GET host {host!r} is not allowed.")
+        last_error: Exception | None = None
+        for attempt in range(self.max_retries):
+            if self.rate_limit_sleep and attempt == 0:
+                self._sleeper(self.rate_limit_sleep)
+            try:
+                with self._client.stream(
+                    "GET",
+                    url,
+                    headers=dict(headers or {}),
+                    timeout=self.timeout_seconds,
+                ) as response:
+                    if response.status_code in {429, 500, 502, 503, 504}:
+                        retry_after = response.headers.get("Retry-After")
+                        try:
+                            delay = (
+                                float(retry_after) if retry_after is not None else float(2**attempt)
+                            )
+                        except ValueError:
+                            delay = float(2**attempt)
+                        self._sleeper(delay)
+                        last_error = ReadOnlyHttpError(
+                            f"HTTP {response.status_code} from {parsed.path}"
+                        )
+                        continue
+                    if response.status_code >= 400:
+                        raise ReadOnlyHttpError(f"HTTP {response.status_code} from {parsed.path}")
+                    if 300 <= response.status_code < 400:
+                        return httpx.Response(
+                            response.status_code,
+                            headers=response.headers,
+                            content=b"",
+                            request=response.request,
+                        )
+                    length = response.headers.get("Content-Length")
+                    if length:
+                        try:
+                            declared = int(length)
+                        except ValueError as exc:
+                            raise ReadOnlyHttpError("invalid Content-Length.") from exc
+                        if declared > max_bytes:
+                            raise ReadOnlyHttpError("Content-Length exceeds max_bytes.")
+                    received = bytearray()
+                    for part in response.iter_bytes(64 * 1024):
+                        if not part:
+                            continue
+                        if len(received) + len(part) > max_bytes:
+                            raise ReadOnlyHttpError("response exceeds max_bytes.")
+                        received.extend(part)
+                    bounded = httpx.Response(
+                        response.status_code,
+                        headers=response.headers,
+                        content=bytes(received),
+                        request=response.request,
+                    )
+                    return bounded
+            except httpx.HTTPError as exc:
+                last_error = exc
+                self._sleeper(min(2**attempt, 8))
+                continue
+        raise ReadOnlyHttpError(f"GET failed after {self.max_retries} attempts") from last_error
