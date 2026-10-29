@@ -26,6 +26,7 @@ from atlas.ingest.http import (
     NetworkDisabledError,
     ReadOnlyHttp,
     ReadOnlyHttpError,
+    format_http_failure,
 )
 from atlas.ingest.snapshot import SnapshotPayload, SnapshotSource, SnapshotStore
 from atlas.validation import InvalidInputError, normalize_symbol
@@ -185,6 +186,7 @@ class FilingDocumentsAdapter:
         chunks: list[FilingTextChunk] = []
         raw_bodies: dict[str, bytes] = {}
         gaps: list[dict[str, Any]] = []
+        last_failure: BaseException | None = None
         selected = _select_filings(source.filings(), query)
         for filing in selected:
             try:
@@ -197,11 +199,17 @@ class FilingDocumentsAdapter:
                     recorded=recorded,
                 )
             except (FilingDocumentError, ReadOnlyHttpError, NetworkDisabledError) as exc:
+                last_failure = exc
+                root = exc.__cause__ if isinstance(exc.__cause__, ReadOnlyHttpError) else exc
                 gaps.append(
                     {
                         "accession": filing.accession,
                         "reason": type(exc).__name__,
-                        "detail": str(exc),
+                        "detail": format_http_failure(exc, user_agent=self._user_agent),
+                        "status_code": getattr(root, "status_code", None),
+                        "attempts": getattr(root, "attempts", None),
+                        "exception_type": getattr(root, "exception_type", None)
+                        or type(exc).__name__,
                     }
                 )
                 continue
@@ -209,7 +217,7 @@ class FilingDocumentsAdapter:
             raw_bodies[record.ref_id] = body
             chunks.extend(_chunks_for_document(record, extracted, provenance))
         if query.require_success:
-            _require_successful_fetch(query, documents, gaps)
+            _require_successful_fetch(query, documents, gaps, cause=last_failure)
         metadata = {
             "vendor": "sec_edgar",
             "adapter_version": ADAPTER_VERSION,
@@ -344,23 +352,28 @@ class FilingDocumentsAdapter:
             raise FilingDocumentError("retrieved document metadata does not match the filing.")
         return record, body, extracted
 
-    def _vendor_get(self, url: str, max_bytes: int) -> tuple[bytes, str]:
-        if self.http is None:
-            raise NetworkDisabledError("EDGAR HTTP client is not configured for this adapter.")
+    def _count_http_attempt(self) -> None:
         self._requests += 1
         if self._requests > self._max_requests:
             raise FilingDocumentError(
                 f"document ingest exceeded max_requests={self._max_requests}."
             )
+
+    def _vendor_get(self, url: str, max_bytes: int) -> tuple[bytes, str]:
+        if self.http is None:
+            raise NetworkDisabledError("EDGAR HTTP client is not configured for this adapter.")
         try:
             response = self.http.get_bounded(
-                url, max_bytes=max_bytes, headers={"User-Agent": self._user_agent}
+                url,
+                max_bytes=max_bytes,
+                headers={"User-Agent": self._user_agent},
+                on_attempt=self._count_http_attempt,
             )
         except ReadOnlyHttpError as exc:
-            detail = str(exc)
-            if "exceeds max_bytes" in detail:
+            detail = format_http_failure(exc, user_agent=self._user_agent)
+            if "exceeds max_bytes" in str(exc):
                 raise FilingDocumentError("document exceeds max_bytes.") from exc
-            raise
+            raise FilingDocumentError(detail) from exc
         if 300 <= response.status_code < 400:
             raise FilingDocumentError("redirects are not followed for filing documents.")
         if response.status_code == 403:
@@ -455,17 +468,21 @@ def _require_successful_fetch(
     query: FilingDocumentQuery,
     documents: list[FilingDocumentRecord],
     gaps: list[dict[str, Any]],
+    *,
+    cause: BaseException | None = None,
 ) -> None:
     if query.accession is not None:
         if not any(item.accession == query.accession for item in documents):
             detail = gaps[0]["detail"] if gaps else "document was not retrieved."
             raise FilingDocumentError(
                 f"requested accession {query.accession} was not retrieved: {detail}"
-            )
+            ) from cause
         return
     if not documents:
         detail = gaps[0]["detail"] if gaps else "no usable documents."
-        raise FilingDocumentError(f"document fetch produced no usable documents: {detail}")
+        raise FilingDocumentError(
+            f"document fetch produced no usable documents: {detail}"
+        ) from cause
 
 
 def _chunks_for_document(
@@ -508,14 +525,19 @@ def _chunks_for_document(
 
 
 def adapter_for_tests(
-    handler: Any, *, user_agent: str = "ATLAS tests contact@example.com"
+    handler: Any,
+    *,
+    user_agent: str = "ATLAS tests contact@example.com",
+    max_retries: int = 3,
+    sleeper: Any = None,
 ) -> FilingDocumentsAdapter:
     http = ReadOnlyHttp(
         allowed_hosts=frozenset({SEC_ARCHIVES_HOST}),
         client=httpx.Client(transport=httpx.MockTransport(handler)),
         allow_network=False,
         rate_limit_sleep=0.0,
-        sleeper=lambda _delay: None,
+        max_retries=max_retries,
+        sleeper=sleeper or (lambda _delay: None),
         user_agent=user_agent,
     )
     return FilingDocumentsAdapter(http=http, user_agent=user_agent)
