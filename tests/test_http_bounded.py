@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
 from pathlib import Path
 
 import httpx
@@ -138,6 +139,94 @@ def test_remote_protocol_error_is_retryable() -> None:
         http.get_bounded(URL, max_bytes=1024)
     assert caught.value.exception_type == "RemoteProtocolError"
     assert caught.value.attempts == 3
+
+
+class _CleanupErrorStream:
+    def __init__(self, inner: object) -> None:
+        self._inner = inner
+        self._response: httpx.Response | None = None
+
+    def __enter__(self) -> httpx.Response:
+        self._response = self._inner.__enter__()  # type: ignore[attr-defined]
+        return self._response
+
+    def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+        try:
+            self._inner.__exit__(exc_type, exc, tb)  # type: ignore[attr-defined]
+        finally:
+            request = self._response.request if self._response is not None else None
+            raise httpx.RemoteProtocolError("stream trailer failed", request=request)
+
+
+class _InterruptBody:
+    def __init__(self, inner: httpx.Response) -> None:
+        self._inner = inner
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._inner, name)
+
+    def iter_bytes(self, *args: object, **kwargs: object) -> Iterator[bytes]:
+        yield BODY[:8]
+        raise httpx.RemoteProtocolError("cut off during body", request=self._inner.request)
+
+    def close(self) -> None:
+        self._inner.close()
+
+
+class _InterruptBodyStream:
+    def __init__(self, inner: object) -> None:
+        self._inner = inner
+
+    def __enter__(self) -> _InterruptBody:
+        return _InterruptBody(self._inner.__enter__())  # type: ignore[attr-defined]
+
+    def __exit__(self, exc_type: object, exc: object, tb: object) -> object:
+        return self._inner.__exit__(exc_type, exc, tb)  # type: ignore[attr-defined]
+
+
+def test_cleanup_error_after_complete_body_does_not_retry() -> None:
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return httpx.Response(200, content=BODY, headers={"content-type": "text/html"})
+
+    http, delays = _client(handler)
+    original_stream = http._client.stream
+
+    def stream_fail_on_close(*args: object, **kwargs: object) -> _CleanupErrorStream:
+        return _CleanupErrorStream(original_stream(*args, **kwargs))
+
+    http._client.stream = stream_fail_on_close  # type: ignore[method-assign]
+    response = http.get_bounded(URL, max_bytes=8_000_000)
+    assert calls["n"] == 1
+    assert delays == []
+    assert response.status_code == 200
+    assert response.content == BODY
+    assert http.last_cleanup_diagnostic is not None
+    assert "RemoteProtocolError" in http.last_cleanup_diagnostic
+    assert UA not in http.last_cleanup_diagnostic
+
+
+def test_remote_protocol_error_during_body_rejects_partial() -> None:
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return httpx.Response(200, content=BODY, headers={"content-type": "text/html"})
+
+    http, _ = _client(handler)
+    original_stream = http._client.stream
+
+    def stream_interrupt(*args: object, **kwargs: object) -> _InterruptBodyStream:
+        return _InterruptBodyStream(original_stream(*args, **kwargs))
+
+    http._client.stream = stream_interrupt  # type: ignore[method-assign]
+    with pytest.raises(ReadOnlyHttpError, match="RemoteProtocolError") as caught:
+        http.get_bounded(URL, max_bytes=8_000_000)
+    assert calls["n"] == 3
+    assert caught.value.exception_type == "RemoteProtocolError"
+    assert http.last_cleanup_diagnostic is None
 
 
 def test_http_429_honors_capped_retry_after() -> None:

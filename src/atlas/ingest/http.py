@@ -114,6 +114,7 @@ class ReadOnlyHttp:
             )
         self._owns_client = client is None
         self._user_agent = user_agent or "ATLAS-read-only/0.1"
+        self.last_cleanup_diagnostic: str | None = None
         headers = {"User-Agent": self._user_agent}
         self._client = client or httpx.Client(
             timeout=timeout_seconds,
@@ -207,6 +208,7 @@ class ReadOnlyHttp:
             raise ReadOnlyHttpError("trading and account endpoints are forbidden.")
         if parsed.scheme != "https" or host not in self.allowed_hosts:
             raise ReadOnlyHttpError(f"GET host {host!r} is not allowed.")
+        self.last_cleanup_diagnostic = None
         last_error: Exception | None = None
         last_status: int | None = None
         attempts = 0
@@ -218,63 +220,73 @@ class ReadOnlyHttp:
                 self._sleeper(self.rate_limit_sleep)
             retry_after: str | None = None
             retry_request = False
+            complete = False
             body: bytes | None = None
             response_headers: httpx.Headers | None = None
             response_request: httpx.Request | None = None
             status_code = 0
+            stream_cm: Any = None
+            response: httpx.Response | None = None
+            entered = False
             try:
-                with self._client.stream(
+                stream_cm = self._client.stream(
                     "GET",
                     url,
                     headers=dict(headers or {}),
                     timeout=self.timeout_seconds,
-                ) as response:
-                    status_code = response.status_code
-                    last_status = status_code
-                    if status_code in _RETRYABLE_STATUS:
-                        retry_after = response.headers.get("Retry-After")
-                        last_error = ReadOnlyHttpError(
-                            f"HTTP {status_code} from {parsed.path}",
-                            status_code=status_code,
-                            exception_type="HTTPStatus",
-                            attempts=attempts,
-                            retryable=True,
-                        )
-                        retry_request = True
-                    elif status_code >= 400:
-                        raise ReadOnlyHttpError(
-                            f"HTTP {status_code} from {parsed.path} after {attempts} attempt(s)",
-                            status_code=status_code,
-                            exception_type="HTTPStatus",
-                            attempts=attempts,
-                        )
-                    elif 300 <= status_code < 400:
-                        body = b""
-                        response_headers = response.headers
-                        response_request = response.request
-                    else:
-                        length = response.headers.get("Content-Length")
-                        if length:
-                            try:
-                                declared = int(length)
-                            except ValueError as exc:
-                                raise ReadOnlyHttpError("invalid Content-Length.") from exc
-                            if declared > max_bytes:
-                                raise ReadOnlyHttpError("Content-Length exceeds max_bytes.")
-                        received = bytearray()
-                        for part in response.iter_bytes(64 * 1024):
-                            if not part:
-                                continue
-                            if len(received) + len(part) > max_bytes:
-                                received.clear()
-                                raise ReadOnlyHttpError("response exceeds max_bytes.")
-                            received.extend(part)
-                        body = bytes(received)
-                        response_headers = response.headers
-                        response_request = response.request
+                )
+                response = stream_cm.__enter__()
+                entered = True
+                status_code = response.status_code
+                last_status = status_code
+                if status_code in _RETRYABLE_STATUS:
+                    retry_after = response.headers.get("Retry-After")
+                    last_error = ReadOnlyHttpError(
+                        f"HTTP {status_code} from {parsed.path}",
+                        status_code=status_code,
+                        exception_type="HTTPStatus",
+                        attempts=attempts,
+                        retryable=True,
+                    )
+                    retry_request = True
+                elif status_code >= 400:
+                    raise ReadOnlyHttpError(
+                        f"HTTP {status_code} from {parsed.path} after {attempts} attempt(s)",
+                        status_code=status_code,
+                        exception_type="HTTPStatus",
+                        attempts=attempts,
+                    )
+                elif 300 <= status_code < 400:
+                    body = b""
+                    response_headers = response.headers
+                    response_request = response.request
+                    complete = True
+                else:
+                    length = response.headers.get("Content-Length")
+                    if length:
+                        try:
+                            declared = int(length)
+                        except ValueError as exc:
+                            raise ReadOnlyHttpError("invalid Content-Length.") from exc
+                        if declared > max_bytes:
+                            raise ReadOnlyHttpError("Content-Length exceeds max_bytes.")
+                    received = bytearray()
+                    for part in response.iter_bytes(64 * 1024):
+                        if not part:
+                            continue
+                        if len(received) + len(part) > max_bytes:
+                            received.clear()
+                            raise ReadOnlyHttpError("response exceeds max_bytes.")
+                        received.extend(part)
+                    body = bytes(received)
+                    response_headers = response.headers
+                    response_request = response.request
+                    complete = True
             except ReadOnlyHttpError:
+                _close_stream_cm(stream_cm, response, entered=entered)
                 raise
             except httpx.HTTPError as exc:
+                _close_stream_cm(stream_cm, response, entered=entered)
                 last_error = exc
                 if not _retryable_transport_error(exc) or attempts >= self.max_retries:
                     raise self._exhausted_error(
@@ -282,17 +294,28 @@ class ReadOnlyHttp:
                     ) from exc
                 self._sleeper(_retry_wait_seconds(None, attempt))
                 continue
+            cleanup_exc = _close_stream_cm(stream_cm, response, entered=entered)
+            if complete and not retry_request:
+                if cleanup_exc is not None:
+                    self.last_cleanup_diagnostic = sanitize_http_text(
+                        f"{type(cleanup_exc).__name__}: {cleanup_exc}",
+                        user_agent=self._user_agent,
+                    )
+                return httpx.Response(
+                    status_code,
+                    headers=response_headers,
+                    content=body or b"",
+                    request=response_request,
+                )
             if retry_request:
                 if attempts >= self.max_retries:
                     break
                 self._sleeper(_retry_wait_seconds(retry_after, attempt))
                 continue
-            return httpx.Response(
-                status_code,
-                headers=response_headers,
-                content=body or b"",
-                request=response_request,
-            )
+            last_error = ReadOnlyHttpError("incomplete document response.")
+            if attempts >= self.max_retries:
+                break
+            self._sleeper(_retry_wait_seconds(None, attempt))
         raise self._exhausted_error(parsed.path, attempts, last_error, last_status) from last_error
 
     def _exhausted_error(
@@ -331,6 +354,24 @@ def _close_quietly(response: httpx.Response) -> None:
         response.close()
     except httpx.HTTPError:
         return
+
+
+def _close_stream_cm(
+    stream_cm: Any, response: httpx.Response | None, *, entered: bool
+) -> httpx.HTTPError | None:
+    first: httpx.HTTPError | None = None
+    if response is not None:
+        try:
+            response.close()
+        except httpx.HTTPError as exc:
+            first = exc
+    if stream_cm is not None and entered:
+        try:
+            stream_cm.__exit__(None, None, None)
+        except httpx.HTTPError as exc:
+            if first is None:
+                first = exc
+    return first
 
 
 def _retryable_transport_error(exc: httpx.HTTPError) -> bool:
