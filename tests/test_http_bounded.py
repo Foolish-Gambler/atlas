@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import gzip
+import hashlib
 import json
+import zlib
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -357,3 +360,125 @@ def test_adapter_max_requests_counts_retries(edgar_env: None, tmp_path: Path) ->
         )
     assert calls["n"] == 2
     assert not store.revision_path("edgar-docs", "budget").exists()
+
+
+def _compressed_response(*, encoding: str, payload: bytes) -> httpx.Response:
+    return httpx.Response(
+        200,
+        headers={
+            "content-type": "text/html",
+            "content-encoding": encoding,
+            "content-length": str(len(payload)),
+            "transfer-encoding": "chunked",
+        },
+        content=payload,
+    )
+
+
+@pytest.mark.parametrize(
+    ("encoding", "payload"),
+    (
+        ("gzip", gzip.compress(BODY)),
+        ("deflate", zlib.compress(BODY)),
+    ),
+)
+def test_get_bounded_decodes_http_content_encoding_once(encoding: str, payload: bytes) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _compressed_response(encoding=encoding, payload=payload)
+
+    http, delays = _client(handler)
+    response = http.get_bounded(URL, max_bytes=8_000_000)
+    assert response.status_code == 200
+    assert response.content == BODY
+    assert response.request is not None
+    assert str(response.request.url) == URL
+    assert "content-encoding" not in response.headers
+    assert "transfer-encoding" not in response.headers
+    assert response.headers.get("content-length") == str(len(BODY))
+    assert response.headers.get("content-type") == "text/html"
+    assert delays == []
+
+
+def test_get_bounded_uncompressed_html_is_unchanged() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=BODY, headers={"content-type": "text/html"})
+
+    response = _client(handler)[0].get_bounded(URL, max_bytes=8_000_000)
+    assert response.content == BODY
+    assert "content-encoding" not in response.headers
+
+
+def test_corrupt_gzip_is_rejected() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _compressed_response(encoding="gzip", payload=b"this is not gzip")
+
+    with pytest.raises(ReadOnlyHttpError, match="DecodingError") as caught:
+        _client(handler, max_retries=2)[0].get_bounded(URL, max_bytes=8_000_000)
+    assert caught.value.exception_type == "DecodingError"
+    assert isinstance(caught.value.__cause__, httpx.DecodingError)
+
+
+def test_decoded_payload_exceeds_max_bytes_despite_small_compressed_body() -> None:
+    huge = b"<html>" + (b"A" * 8_000) + b"</html>"
+    payload = gzip.compress(huge)
+    assert len(payload) < 200
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _compressed_response(encoding="gzip", payload=payload)
+
+    with pytest.raises(ReadOnlyHttpError, match="max_bytes"):
+        _client(handler)[0].get_bounded(URL, max_bytes=100)
+
+
+def test_gzip_document_ingest_hashes_decoded_entity(edgar_env: None, tmp_path: Path) -> None:
+    html = (FIXTURE_DIR / "aapl_10q_excerpt.html").read_bytes()
+    payload = gzip.compress(html)
+    _source(tmp_path)
+    source = SnapshotStore(tmp_path).load("edgar-aapl", "meta-1")
+    store = SnapshotStore(tmp_path)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _compressed_response(encoding="gzip", payload=payload)
+
+    result = adapter_for_tests(handler).ingest_from_source(
+        store,
+        source,
+        dataset_id="edgar-docs",
+        revision="gzip-1",
+        query=FilingDocumentQuery(
+            accession="0000320193-26-000020",
+            require_success=True,
+        ),
+        retrieval_mode=RETRIEVAL_VENDOR_GET,
+    )
+    assert len(result.documents) == 1
+    doc = result.documents[0]
+    assert doc.sha256 == hashlib.sha256(html).hexdigest()
+    assert doc.byte_length == len(html)
+    assert doc.sha256 != hashlib.sha256(payload).hexdigest()
+    loaded = store.load("edgar-docs", "gzip-1")
+    assert loaded.filing_document_bytes(doc.ref_id) == html
+    assert loaded.manifest.metadata["stored_payload"] == "decoded_http_entity"
+
+
+def test_corrupt_gzip_ingest_does_not_publish_snapshot(edgar_env: None, tmp_path: Path) -> None:
+    _source(tmp_path)
+    source = SnapshotStore(tmp_path).load("edgar-aapl", "meta-1")
+    store = SnapshotStore(tmp_path)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _compressed_response(encoding="gzip", payload=b"not-gzip")
+
+    with pytest.raises(FilingDocumentError, match="DecodingError"):
+        adapter_for_tests(handler, max_retries=2).ingest_from_source(
+            store,
+            source,
+            dataset_id="edgar-docs",
+            revision="bad-gzip",
+            query=FilingDocumentQuery(
+                accession="0000320193-26-000020",
+                require_success=True,
+            ),
+            retrieval_mode=RETRIEVAL_VENDOR_GET,
+        )
+    assert not store.revision_path("edgar-docs", "bad-gzip").exists()

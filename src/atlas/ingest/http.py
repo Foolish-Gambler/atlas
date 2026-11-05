@@ -17,6 +17,7 @@ SEC_ALLOWED_HOSTS = frozenset({SEC_WWW_HOST, SEC_DATA_HOST})
 _BLOCKED_HOSTS = frozenset({"api.alpaca.markets", "paper-api.alpaca.markets"})
 _RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
 _MAX_RETRY_WAIT_SECONDS = 8.0
+_STALE_TRANSFER_HEADERS = frozenset({"content-encoding", "content-length", "transfer-encoding"})
 _REDACT_HEADER_RE = re.compile(
     r"(?i)(authorization|proxy-authorization|cookie|set-cookie|x-api-key|user-agent)"
     r"\s*[:=]\s*[^\r\n;]+"
@@ -258,12 +259,12 @@ class ReadOnlyHttp:
                     )
                 elif 300 <= status_code < 400:
                     body = b""
-                    response_headers = response.headers
+                    response_headers = _decoded_entity_headers(response.headers)
                     response_request = response.request
                     complete = True
                 else:
                     length = response.headers.get("Content-Length")
-                    if length:
+                    if length and not _has_http_content_encoding(response.headers):
                         try:
                             declared = int(length)
                         except ValueError as exc:
@@ -279,7 +280,7 @@ class ReadOnlyHttp:
                             raise ReadOnlyHttpError("response exceeds max_bytes.")
                         received.extend(part)
                     body = bytes(received)
-                    response_headers = response.headers
+                    response_headers = _decoded_entity_headers(response.headers)
                     response_request = response.request
                     complete = True
             except ReadOnlyHttpError:
@@ -347,6 +348,20 @@ class ReadOnlyHttp:
             attempts=attempts,
             retryable=True,
         )
+
+
+def _has_http_content_encoding(headers: httpx.Headers) -> bool:
+    encoding = (headers.get("Content-Encoding") or "").strip().lower()
+    return bool(encoding) and encoding != "identity"
+
+
+def _decoded_entity_headers(headers: httpx.Headers | None) -> httpx.Headers:
+    """Copy headers for a reconstructed identity-coded body. Drop stale transfer metadata."""
+    copied = httpx.Headers(headers)
+    for name in list(copied.keys()):
+        if name.lower() in _STALE_TRANSFER_HEADERS:
+            del copied[name]
+    return copied
 
 
 def _close_quietly(response: httpx.Response) -> None:
