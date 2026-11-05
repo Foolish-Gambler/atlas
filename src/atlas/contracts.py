@@ -449,6 +449,34 @@ class MacroRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class ResearchClaim:
+    """One research statement. Mechanical citation checks are not semantic proof."""
+
+    claim_id: str
+    text: str
+    category: str
+    evidence_refs: tuple[str, ...] = ()
+    quoted_span: str | None = None
+    chunk_id: str | None = None
+    fact_id: str | None = None
+    text_start: int | None = None
+    text_end: int | None = None
+    citation_mechanically_valid: bool = False
+    semantically_verified: bool = False
+
+    def __post_init__(self) -> None:
+        if not self.claim_id.strip() or not self.text.strip() or not self.category.strip():
+            raise InvalidInputError("claim_id, text, and category are required.")
+        object.__setattr__(self, "semantically_verified", False)
+        if self.quoted_span == "":
+            object.__setattr__(self, "quoted_span", None)
+        if self.chunk_id == "":
+            object.__setattr__(self, "chunk_id", None)
+        if self.fact_id == "":
+            object.__setattr__(self, "fact_id", None)
+
+
+@dataclass(frozen=True, slots=True)
 class ResearchArtifact:
     artifact_id: str
     model_id: str
@@ -458,6 +486,21 @@ class ResearchArtifact:
     symbols: tuple[str, ...]
     thesis: str
     evidence_refs: tuple[str, ...] = ()
+    accession: str | None = None
+    claims: tuple[ResearchClaim, ...] = ()
+    observations: tuple[str, ...] = ()
+    growth_drivers: tuple[str, ...] = ()
+    risks: tuple[str, ...] = ()
+    bullish_hypotheses: tuple[str, ...] = ()
+    bearish_hypotheses: tuple[str, ...] = ()
+    counterarguments: tuple[str, ...] = ()
+    missing_information: tuple[str, ...] = ()
+    uncertainties: tuple[str, ...] = ()
+    validation_status: str = "unchecked"
+    validation_errors: tuple[str, ...] = ()
+    provider_id: str = "unspecified"
+    simulated: bool = True
+    untrusted_evidence: bool = True
 
     def __post_init__(self) -> None:
         if (
@@ -471,6 +514,11 @@ class ResearchArtifact:
         )
         if not self.symbols:
             raise InvalidInputError("research artifacts must name at least one symbol.")
+        if self.accession == "":
+            object.__setattr__(self, "accession", None)
+        if self.validation_status not in {"unchecked", "valid", "invalid"}:
+            raise InvalidInputError("validation_status must be unchecked, valid, or invalid.")
+        object.__setattr__(self, "untrusted_evidence", True)
 
 
 @dataclass(frozen=True, slots=True)

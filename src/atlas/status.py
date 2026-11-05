@@ -64,6 +64,7 @@ def collect_status(settings: AtlasSettings | None = None) -> SystemStatus:
         ModuleStatus("risk", True, "deterministic pre-trade checks"),
         ModuleStatus("ingest", True, "snapshots local; Alpaca/EDGAR GET off by default"),
         ModuleStatus("backtesting", True, "PIT replay of provided bars"),
+        ModuleStatus("research", True, "offline mock provider; no LLM network"),
         ModuleStatus("paper_trading", True, "in-memory simulated broker"),
     )
     return SystemStatus(

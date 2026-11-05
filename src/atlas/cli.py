@@ -133,6 +133,30 @@ def build_parser() -> argparse.ArgumentParser:
         help="Fetch this accession only. Fails if it is missing from the source snapshot.",
     )
 
+    research = subparsers.add_parser(
+        "research", help="Offline evidence-grounded research (mock provider in M3-A)."
+    )
+    research_sub = research.add_subparsers(dest="research_command", required=True)
+    analyze = research_sub.add_parser(
+        "analyze",
+        help="Retrieve snapshot evidence and write a mock research revision. No LLM HTTP.",
+    )
+    analyze.add_argument("--root", required=True, type=Path)
+    analyze.add_argument("--symbol", default="AAPL")
+    analyze.add_argument("--document-dataset", required=True)
+    analyze.add_argument("--document-revision", required=True)
+    analyze.add_argument("--financial-dataset", required=True)
+    analyze.add_argument("--financial-revision", required=True)
+    analyze.add_argument("--dataset", required=True, help="New immutable research dataset id.")
+    analyze.add_argument("--revision", required=True, help="New immutable research revision id.")
+    analyze.add_argument("--provider", default="mock", help="M3-A supports mock only.")
+    analyze.add_argument("--accession", default=None)
+    analyze.add_argument("--as-of", default=None, help="ISO-8601 research-as-of (aware).")
+    analyze.add_argument("--question", default=None)
+    analyze.add_argument("--intraday", action="store_true")
+    analyze.add_argument("--max-chunks", type=int, default=16)
+    analyze.add_argument("--max-facts", type=int, default=24)
+
     paper = subparsers.add_parser("paper", help="Paper-only virtual portfolio helpers.")
     paper_sub = paper.add_subparsers(dest="paper_command", required=True)
     demo = paper_sub.add_parser("demo", help="Replay a snapshot with $10,000 virtual cash.")
@@ -169,6 +193,8 @@ def main(argv: list[str] | None = None) -> int:
         except NetworkDisabledError as exc:
             print(str(exc), file=sys.stderr)
             return 2
+    if args.command == "research":
+        return _research_command(args)
     if args.command == "paper":
         return _paper_command(args)
     parser.print_help()
@@ -591,6 +617,81 @@ def _edgar_command(args: argparse.Namespace) -> int:
         )
     )
     return 0
+
+
+def _research_command(args: argparse.Namespace) -> int:
+    from atlas.ingest.codec import parse_datetime
+    from atlas.research.engine import ResearchEngine
+    from atlas.research.models import DEFAULT_QUESTION, ResearchQuery
+    from atlas.research.provider import provider_from_name
+
+    if args.research_command != "analyze":
+        return 1
+    store = SnapshotStore(args.root)
+    as_of = (
+        parse_datetime(args.as_of, "as_of")
+        if args.as_of
+        else _research_as_of(
+            store,
+            args.document_dataset,
+            args.document_revision,
+            args.accession,
+        )
+    )
+    query = ResearchQuery(
+        symbol=args.symbol,
+        research_as_of=as_of,
+        question=args.question or DEFAULT_QUESTION,
+        accession=args.accession,
+        max_chunks=args.max_chunks,
+        max_facts=args.max_facts,
+        intraday=bool(args.intraday),
+    )
+    result = ResearchEngine(store, provider=provider_from_name(args.provider)).analyze(
+        query,
+        document_dataset=args.document_dataset,
+        document_revision=args.document_revision,
+        financial_dataset=args.financial_dataset,
+        financial_revision=args.financial_revision,
+        output_dataset=args.dataset,
+        output_revision=args.revision,
+    )
+    print(
+        json.dumps(
+            {
+                "status": "created" if result.validation.valid else "invalid",
+                "dataset_id": result.dataset_id,
+                "revision": result.revision,
+                "artifact_id": result.artifact.artifact_id,
+                "provider_id": result.artifact.provider_id,
+                "simulated": True,
+                "llm_called": False,
+                "http": False,
+                "validation_status": result.artifact.validation_status,
+                "validation_errors": list(result.artifact.validation_errors),
+                "chunks": len(result.pack.chunks),
+                "facts": len(result.pack.facts),
+                "claims": len(result.artifact.claims),
+                "disclaimer": ("Mock research only. Not LLM analysis and not investment advice."),
+            },
+            indent=2,
+        )
+    )
+    return 0 if result.validation.valid else 2
+
+
+def _research_as_of(store: SnapshotStore, dataset: str, revision: str, accession: str | None):
+    source = store.load(dataset, revision)
+    docs = [
+        item
+        for item in source.filing_documents()
+        if accession is None or item.accession == accession
+    ]
+    if not docs:
+        from atlas.validation import InvalidInputError
+
+        raise InvalidInputError("no filing documents available to derive --as-of")
+    return max(item.time.available_time for item in docs)
 
 
 def _paper_command(args: argparse.Namespace) -> int:

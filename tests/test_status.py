@@ -15,6 +15,7 @@ def test_collect_status_lists_all_modules(settings: AtlasSettings) -> None:
         "risk",
         "ingest",
         "backtesting",
+        "research",
         "paper_trading",
     }
     assert status.live_broker_connected is False

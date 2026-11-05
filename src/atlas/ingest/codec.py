@@ -16,6 +16,7 @@ from atlas.contracts import (
     NewsRecord,
     Provenance,
     ResearchArtifact,
+    ResearchClaim,
     ReturnPrediction,
     StatementRecord,
     StreamEvent,
@@ -304,6 +305,21 @@ def research_to_row(record: ResearchArtifact) -> dict[str, Any]:
         "symbols": list(record.symbols),
         "thesis": record.thesis,
         "evidence_refs": list(record.evidence_refs),
+        "accession": record.accession,
+        "claims": [_claim_to_row(claim) for claim in record.claims],
+        "observations": list(record.observations),
+        "growth_drivers": list(record.growth_drivers),
+        "risks": list(record.risks),
+        "bullish_hypotheses": list(record.bullish_hypotheses),
+        "bearish_hypotheses": list(record.bearish_hypotheses),
+        "counterarguments": list(record.counterarguments),
+        "missing_information": list(record.missing_information),
+        "uncertainties": list(record.uncertainties),
+        "validation_status": record.validation_status,
+        "validation_errors": list(record.validation_errors),
+        "provider_id": record.provider_id,
+        "simulated": record.simulated,
+        "untrusted_evidence": True,
         **time_to_row(record.time),
     }
 
@@ -311,6 +327,7 @@ def research_to_row(record: ResearchArtifact) -> dict[str, Any]:
 def parse_research(
     row: dict[str, Any], provenance: Provenance, *, require_ingested: bool
 ) -> ResearchArtifact:
+    claims = tuple(_parse_claim(item) for item in row.get("claims") or ())
     return ResearchArtifact(
         artifact_id=row["artifact_id"],
         model_id=row["model_id"],
@@ -320,6 +337,53 @@ def parse_research(
         symbols=tuple(row["symbols"]),
         thesis=row["thesis"],
         evidence_refs=tuple(row.get("evidence_refs", ())),
+        accession=row.get("accession"),
+        claims=claims,
+        observations=tuple(row.get("observations") or ()),
+        growth_drivers=tuple(row.get("growth_drivers") or ()),
+        risks=tuple(row.get("risks") or ()),
+        bullish_hypotheses=tuple(row.get("bullish_hypotheses") or ()),
+        bearish_hypotheses=tuple(row.get("bearish_hypotheses") or ()),
+        counterarguments=tuple(row.get("counterarguments") or ()),
+        missing_information=tuple(row.get("missing_information") or ()),
+        uncertainties=tuple(row.get("uncertainties") or ()),
+        validation_status=str(row.get("validation_status") or "unchecked"),
+        validation_errors=tuple(row.get("validation_errors") or ()),
+        provider_id=str(row.get("provider_id") or "unspecified"),
+        simulated=bool(row.get("simulated", True)),
+        untrusted_evidence=True,
+    )
+
+
+def _claim_to_row(claim: ResearchClaim) -> dict[str, Any]:
+    return {
+        "claim_id": claim.claim_id,
+        "text": claim.text,
+        "category": claim.category,
+        "evidence_refs": list(claim.evidence_refs),
+        "quoted_span": claim.quoted_span,
+        "chunk_id": claim.chunk_id,
+        "fact_id": claim.fact_id,
+        "text_start": claim.text_start,
+        "text_end": claim.text_end,
+        "citation_mechanically_valid": claim.citation_mechanically_valid,
+        "semantically_verified": False,
+    }
+
+
+def _parse_claim(row: dict[str, Any]) -> ResearchClaim:
+    return ResearchClaim(
+        claim_id=str(row["claim_id"]),
+        text=str(row["text"]),
+        category=str(row["category"]),
+        evidence_refs=tuple(row.get("evidence_refs") or ()),
+        quoted_span=row.get("quoted_span"),
+        chunk_id=row.get("chunk_id"),
+        fact_id=row.get("fact_id"),
+        text_start=row.get("text_start"),
+        text_end=row.get("text_end"),
+        citation_mechanically_valid=bool(row.get("citation_mechanically_valid", False)),
+        semantically_verified=False,
     )
 
 

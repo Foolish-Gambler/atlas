@@ -77,9 +77,13 @@
 
 ## 마일스톤 3 — 리서치 에이전트
 
-- `ResearchArtifact`만 산출하는 LLM 워커. 주문 객체 생성 금지.
+### M3-A — 완료: 근거 검색·모킹 리서치 엔진
+
+`SnapshotEvidenceRetriever` + `MockResearchProvider` + `EvidenceValidator`. 공시 청크/XBRL만 PIT로 읽고 `ResearchArtifact`를 새 불변 revision에 저장한다. 실제 LLM HTTP는 M3-B. 설계: `docs/M3A_RESEARCH_ENGINE.md`.
+
+- `ResearchArtifact`만 산출. 주문 객체 생성 금지.
 - 영향 종목, 이벤트 요약, 근거 span, 모델 버전.
-- 오프라인 픽스처 응답으로 먼저 테스트하고, 실제 LLM은 승인 후.
+- 오프라인 픽스처/모킹 응답으로 먼저 테스트하고, 실제 LLM은 승인 후 (M3-B).
 
 ## 마일스톤 4 — 정량 예측과 결합
 
