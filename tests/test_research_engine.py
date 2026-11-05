@@ -7,6 +7,7 @@ from pathlib import Path
 import httpx
 import pytest
 
+from atlas.backtesting.view import build_view
 from atlas.cli import build_parser, main
 from atlas.contracts import (
     FilingDocumentRecord,
@@ -23,8 +24,10 @@ from atlas.ingest.edgar import adapter_for_tests as edgar_adapter
 from atlas.ingest.filing_docs import FilingDocumentQuery, adapter_for_tests
 from atlas.ingest.snapshot import RevisionExistsError, SnapshotIntegrityError, SnapshotStore
 from atlas.research.engine import ResearchEngine
+from atlas.research.errors import LlmNetworkDisabledError
 from atlas.research.models import EvidencePack, ResearchQuery
-from atlas.research.provider import MOCK_BANNER, OpenAIResearchProvider, provider_from_name
+from atlas.research.openai_provider import OpenAIResearchProvider
+from atlas.research.provider import MOCK_BANNER, provider_from_name
 from atlas.research.retriever import SnapshotEvidenceRetriever
 from atlas.research.validator import EvidenceValidator
 from atlas.validation import InvalidInputError
@@ -160,6 +163,8 @@ def test_mock_research_is_deterministic_and_isolated(edgar_env: None, tmp_path: 
     loaded = store.load("research-out", "a")
     assert loaded.research()[0].artifact_id == first.artifact.artifact_id
     assert loaded.manifest.metadata["llm_called"] is False
+    assert first.artifact.time.available_time >= first.artifact.generated_at
+    assert first.artifact.research_as_of == AS_OF
     with pytest.raises(RevisionExistsError):
         engine.analyze(
             _query(),
@@ -252,11 +257,49 @@ def test_oversized_question_is_rejected() -> None:
         ResearchQuery(symbol="AAPL", research_as_of=AS_OF, question="x" * 2001)
 
 
-def test_openai_provider_is_disabled() -> None:
-    with pytest.raises(NotImplementedError, match="M3-B"):
-        provider_from_name("openai")
-    with pytest.raises(NotImplementedError):
-        OpenAIResearchProvider()
+def test_openai_provider_requires_network_gate(
+    monkeypatch: pytest.MonkeyPatch, edgar_env: None, tmp_path: Path
+) -> None:
+    monkeypatch.delenv("ATLAS_ALLOW_LLM_NETWORK", raising=False)
+    monkeypatch.setenv("ATLAS_OPENAI_MODEL", "test-model")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    store = _snapshots(tmp_path)
+    pack = ResearchEngine(store).retriever.retrieve(
+        _query(),
+        document_dataset="edgar-docs",
+        document_revision="1",
+        financial_dataset="edgar-aapl",
+        financial_revision="meta-1",
+    )
+    provider = provider_from_name("openai")
+    with pytest.raises(LlmNetworkDisabledError):
+        provider.analyze(_query(), pack)
+    with pytest.raises(LlmNetworkDisabledError):
+        OpenAIResearchProvider(model_id="test-model", api_key="sk-test").analyze(_query(), pack)
+
+
+def test_research_as_of_does_not_backdate_availability(edgar_env: None, tmp_path: Path) -> None:
+    store = _snapshots(tmp_path)
+    generated = datetime(2026, 11, 5, 16, 0, tzinfo=UTC)
+    result = ResearchEngine(store).analyze(
+        _query(),
+        document_dataset="edgar-docs",
+        document_revision="1",
+        financial_dataset="edgar-aapl",
+        financial_revision="meta-1",
+        output_dataset="research-out",
+        output_revision="timed",
+        created_at=generated,
+    )
+    assert result.artifact.research_as_of == AS_OF
+    assert result.artifact.generated_at == generated
+    assert result.artifact.time.event_time == generated
+    assert result.artifact.time.available_time == generated
+    assert result.artifact.time.available_time > AS_OF
+    source = store.load("research-out", "timed")
+    visible = [event for event in source.stream() if event.time.available_time <= AS_OF]
+    view = build_view(source, visible, AS_OF)
+    assert view.research == ()
 
 
 def test_validator_rejects_missing_and_bad_citations() -> None:
@@ -415,6 +458,95 @@ def test_validator_rejects_missing_and_bad_citations() -> None:
     assert any(
         issue.code == "future_evidence"
         for issue in validator.validate(future_art, future_pack).issues
+    )
+
+    other = FilingTextChunk(
+        chunk_id=f"filing-text:{ACCESSION}:{'a' * 64}:1",
+        accession=ACCESSION,
+        document_sha256="a" * 64,
+        source_url=CANONICAL,
+        text="Unrelated later span about inventory.",
+        text_start=len(excerpt),
+        text_end=len(excerpt) + len("Unrelated later span about inventory."),
+        time=time,
+        provenance=_prov(),
+        section_heading="Item 2. MD&A",
+    )
+    document = FilingDocumentRecord(
+        symbol="AAPL",
+        accession=ACCESSION,
+        cik="0000320193",
+        form_type="10-Q",
+        primary_document="aapl-20260627.htm",
+        source_url=CANONICAL,
+        sha256="a" * 64,
+        mime_type="text/html",
+        byte_length=10,
+        time=time,
+        provenance=_prov(),
+        retrieved_at=time.available_time,
+        encoding="utf-8",
+        cleaned_text=excerpt + other.text,
+        acceptance_verified=True,
+        intraday_eligible=True,
+    )
+    ranged = EvidencePack(
+        query=query,
+        documents=(document,),
+        chunks=(chunk, other),
+        facts=(fact,),
+        document_dataset="docs",
+        document_revision="1",
+        financial_dataset="fin",
+        financial_revision="1",
+    )
+    cross = ResearchArtifact(
+        artifact_id="r5",
+        model_id="m",
+        model_version="1",
+        time=time,
+        provenance=_prov(),
+        symbols=("AAPL",),
+        thesis="x" * 24,
+        claims=(
+            ResearchClaim(
+                claim_id="c5",
+                text="Cited the wrong chunk.",
+                category="performance",
+                evidence_refs=(chunk.chunk_id,),
+                chunk_id=chunk.chunk_id,
+                quoted_span=other.text,
+                text_start=other.text_start,
+                text_end=other.text_end,
+            ),
+        ),
+    )
+    assert any(
+        issue.code == "chunk_range_mismatch" for issue in validator.validate(cross, ranged).issues
+    )
+    fake_num = ResearchArtifact(
+        artifact_id="r6",
+        model_id="m",
+        model_version="1",
+        time=time,
+        provenance=_prov(),
+        symbols=("AAPL",),
+        thesis="x" * 24,
+        claims=(
+            ResearchClaim(
+                claim_id="c6",
+                text="Sales were 999.",
+                category="performance",
+                evidence_refs=(fact.ref_id,),
+                fact_id=fact.ref_id,
+                asserted_value=999.0,
+                asserted_unit="USD",
+                asserted_accession=ACCESSION,
+            ),
+        ),
+    )
+    assert any(
+        issue.code == "fabricated_value" for issue in validator.validate(fake_num, pack).issues
     )
 
 

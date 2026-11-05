@@ -134,12 +134,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     research = subparsers.add_parser(
-        "research", help="Offline evidence-grounded research (mock provider in M3-A)."
+        "research", help="Evidence-grounded research (mock default; OpenAI opt-in)."
     )
     research_sub = research.add_subparsers(dest="research_command", required=True)
     analyze = research_sub.add_parser(
         "analyze",
-        help="Retrieve snapshot evidence and write a mock research revision. No LLM HTTP.",
+        help="Retrieve snapshot evidence and write a research revision. OpenAI is opt-in.",
     )
     analyze.add_argument("--root", required=True, type=Path)
     analyze.add_argument("--symbol", default="AAPL")
@@ -147,15 +147,30 @@ def build_parser() -> argparse.ArgumentParser:
     analyze.add_argument("--document-revision", required=True)
     analyze.add_argument("--financial-dataset", required=True)
     analyze.add_argument("--financial-revision", required=True)
-    analyze.add_argument("--dataset", required=True, help="New immutable research dataset id.")
-    analyze.add_argument("--revision", required=True, help="New immutable research revision id.")
-    analyze.add_argument("--provider", default="mock", help="M3-A supports mock only.")
+    analyze.add_argument("--dataset", default=None, help="New immutable research dataset id.")
+    analyze.add_argument("--revision", default=None, help="New immutable research revision id.")
+    analyze.add_argument("--provider", default="mock", help="mock (default) or openai.")
     analyze.add_argument("--accession", default=None)
     analyze.add_argument("--as-of", default=None, help="ISO-8601 research-as-of (aware).")
     analyze.add_argument("--question", default=None)
     analyze.add_argument("--intraday", action="store_true")
+    analyze.add_argument(
+        "--retrospective",
+        action="store_true",
+        help="Mark output as historical replay research; unusable as a past trading signal.",
+    )
     analyze.add_argument("--max-chunks", type=int, default=16)
     analyze.add_argument("--max-facts", type=int, default=24)
+    analyze.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Estimate evidence payload size. Does not call OpenAI or write a snapshot.",
+    )
+    analyze.add_argument(
+        "--save-failures",
+        action="store_true",
+        help="Store invalid LLM output in a separate unusable diagnostic dataset.",
+    )
 
     paper = subparsers.add_parser("paper", help="Paper-only virtual portfolio helpers.")
     paper_sub = paper.add_subparsers(dest="paper_command", required=True)
@@ -194,7 +209,30 @@ def main(argv: list[str] | None = None) -> int:
             print(str(exc), file=sys.stderr)
             return 2
     if args.command == "research":
-        return _research_command(args)
+        try:
+            return _research_command(args)
+        except Exception as exc:
+            from atlas.research.errors import (
+                LlmNetworkDisabledError,
+                ResearchBudgetError,
+                ResearchProviderError,
+                ResearchRejectedError,
+            )
+            from atlas.validation import InvalidInputError
+
+            if isinstance(
+                exc,
+                (
+                    LlmNetworkDisabledError,
+                    ResearchBudgetError,
+                    ResearchProviderError,
+                    ResearchRejectedError,
+                    InvalidInputError,
+                ),
+            ):
+                print(str(exc), file=sys.stderr)
+                return 2
+            raise
     if args.command == "paper":
         return _paper_command(args)
     parser.print_help()
@@ -646,8 +684,28 @@ def _research_command(args: argparse.Namespace) -> int:
         max_chunks=args.max_chunks,
         max_facts=args.max_facts,
         intraday=bool(args.intraday),
+        retrospective=bool(args.retrospective),
     )
-    result = ResearchEngine(store, provider=provider_from_name(args.provider)).analyze(
+    if args.dry_run:
+        engine = ResearchEngine(store)
+        print(
+            json.dumps(
+                engine.estimate(
+                    query,
+                    document_dataset=args.document_dataset,
+                    document_revision=args.document_revision,
+                    financial_dataset=args.financial_dataset,
+                    financial_revision=args.financial_revision,
+                ),
+                indent=2,
+            )
+        )
+        return 0
+    if not args.dataset or not args.revision:
+        print("--dataset and --revision are required unless --dry-run is set.", file=sys.stderr)
+        return 2
+    engine = ResearchEngine(store, provider=provider_from_name(args.provider))
+    result = engine.analyze(
         query,
         document_dataset=args.document_dataset,
         document_revision=args.document_revision,
@@ -655,29 +713,42 @@ def _research_command(args: argparse.Namespace) -> int:
         financial_revision=args.financial_revision,
         output_dataset=args.dataset,
         output_revision=args.revision,
+        save_failures=bool(args.save_failures),
     )
     print(
         json.dumps(
             {
-                "status": "created" if result.validation.valid else "invalid",
+                "status": "created" if result.published else "invalid",
                 "dataset_id": result.dataset_id,
                 "revision": result.revision,
                 "artifact_id": result.artifact.artifact_id,
                 "provider_id": result.artifact.provider_id,
-                "simulated": True,
-                "llm_called": False,
-                "http": False,
+                "simulated": result.artifact.simulated,
+                "llm_called": result.artifact.llm_called,
+                "http": result.artifact.llm_called,
+                "research_as_of": query.research_as_of.isoformat(),
+                "generated_at": (
+                    result.artifact.generated_at.isoformat()
+                    if result.artifact.generated_at
+                    else None
+                ),
+                "available_time": result.artifact.time.available_time.isoformat(),
+                "retrospective": result.artifact.retrospective,
+                "usable_for_signals": result.artifact.usable_for_signals,
                 "validation_status": result.artifact.validation_status,
                 "validation_errors": list(result.artifact.validation_errors),
                 "chunks": len(result.pack.chunks),
                 "facts": len(result.pack.facts),
                 "claims": len(result.artifact.claims),
-                "disclaimer": ("Mock research only. Not LLM analysis and not investment advice."),
+                "disclaimer": (
+                    "Not investment advice and not an order. "
+                    "Mock output is not LLM analysis; OpenAI output is not a live trade."
+                ),
             },
             indent=2,
         )
     )
-    return 0 if result.validation.valid else 2
+    return 0 if result.published else 2
 
 
 def _research_as_of(store: SnapshotStore, dataset: str, revision: str, accession: str | None):

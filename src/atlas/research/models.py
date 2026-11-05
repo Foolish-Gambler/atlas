@@ -35,6 +35,7 @@ class ResearchQuery:
     max_question_chars: int = MAX_QUESTION_CHARS
     intraday: bool = False
     allow_unverified: bool = False
+    retrospective: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "symbol", normalize_symbol(self.symbol))
@@ -86,6 +87,17 @@ class ModelResearchResponse:
     missing_information: tuple[str, ...] = ()
     uncertainties: tuple[str, ...] = ()
     evidence_refs: tuple[str, ...] = ()
+    llm_called: bool = False
+    simulated: bool = True
+    prompt_version: str = "m3a.mock"
+    schema_version: str = "m3a.research.v1"
+    response_id: str | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    request_count: int = 0
+    generated_at: datetime | None = None
+    estimated_cost: float | None = None
+    model_version: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

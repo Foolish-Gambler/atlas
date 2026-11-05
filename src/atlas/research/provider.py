@@ -1,4 +1,4 @@
-"""Research model providers. M3-A ships a deterministic mock only. No LLM HTTP."""
+"""Research model providers. Mock is default. OpenAI is opt-in and gated."""
 
 from __future__ import annotations
 
@@ -95,29 +95,15 @@ class MockResearchProvider:
         )
 
 
-class OpenAIResearchProvider:
-    """Reserved for M3-B. Instantiation is refused in M3-A."""
-
-    provider_id = "openai"
-    model_id = "openai.unconfigured"
-    model_version = "disabled"
-
-    def __init__(self, *args: object, **kwargs: object) -> None:
-        raise NotImplementedError(
-            "OpenAIResearchProvider is reserved for M3-B. M3-A allows --provider mock only."
-        )
-
-    def analyze(self, query: ResearchQuery, pack: EvidencePack) -> ModelResearchResponse:
-        raise NotImplementedError("M3-A does not call LLM APIs.")
-
-
-def provider_from_name(name: str) -> ResearchProvider:
+def provider_from_name(name: str, **kwargs: object) -> ResearchProvider:
     normalized = name.strip().lower()
     if normalized == "mock":
         return MockResearchProvider()
     if normalized in {"openai", "openai-compatible"}:
-        return OpenAIResearchProvider()
-    raise ValueError(f"unknown research provider {name!r}. M3-A supports mock only.")
+        from atlas.research.openai_provider import OpenAIResearchProvider
+
+        return OpenAIResearchProvider.from_env(**kwargs)
+    raise ValueError(f"unknown research provider {name!r}. Use mock or openai.")
 
 
 def _is_section(pack: EvidencePack, marker: str) -> bool:

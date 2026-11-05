@@ -85,6 +85,10 @@
 - 영향 종목, 이벤트 요약, 근거 span, 모델 버전.
 - 오프라인 픽스처/모킹 응답으로 먼저 테스트하고, 실제 LLM은 승인 후 (M3-B).
 
+### M3-B — 완료: OpenAI 근거 리서치 (옵트인)
+
+`OpenAIResearchProvider`는 Responses API + Structured Outputs를 쓴다. 기본값은 오프라인이다. `ATLAS_ALLOW_LLM_NETWORK=1`과 `OPENAI_API_KEY`가 있을 때만 호출한다. 산출물의 `available_time`은 생성 시각이며 공시 cutoff로 소급하지 않는다. 설계: `docs/M3B_OPENAI_RESEARCH.md`.
+
 ## 마일스톤 4 — 정량 예측과 결합
 
 - 피처는 PIT 조인만 사용 (공시 `available_time` 이전 시세만).

@@ -108,6 +108,8 @@ def build_view(
             for artifact in source.research()
             if f"research:{artifact.artifact_id}" in visible_ids
             and artifact.time.available_time <= as_of
+            and artifact.usable_for_signals
+            and not artifact.retrospective
         ),
         predictions=tuple(
             prediction

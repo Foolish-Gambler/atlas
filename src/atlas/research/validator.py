@@ -2,10 +2,18 @@
 
 from __future__ import annotations
 
+import math
+import re
+
 from atlas.contracts import FilingTextChunk, ResearchArtifact, ResearchClaim, XbrlFactRecord
 from atlas.research.models import EvidencePack, ValidationIssue, ValidationReport
 
 _FACTUAL_CATEGORIES = frozenset({"performance", "growth", "risk"})
+_FORBIDDEN = re.compile(
+    r"\b(strong buy|market order|limit order|place an order|guaranteed return|"
+    r"expected return|target price|buy now|sell now)\b",
+    re.IGNORECASE,
+)
 
 
 class EvidenceValidator:
@@ -19,6 +27,7 @@ class EvidenceValidator:
             issues.extend(_check_ref(ref, pack, chunks, facts, documents, as_of, claim_id=None))
         for claim in artifact.claims:
             issues.extend(_check_claim(claim, pack, chunks, facts, documents, as_of))
+        issues.extend(_check_forbidden_text(artifact))
         unique: list[ValidationIssue] = []
         seen: set[tuple[str, str, str | None]] = set()
         for issue in issues:
@@ -81,20 +90,13 @@ def _check_claim(
                     claim_id=claim.claim_id,
                 )
             )
-        elif not fact.unit.strip():
-            issues.append(
-                ValidationIssue(
-                    "invalid_unit",
-                    "XBRL fact is missing a unit.",
-                    ref_id=fact.ref_id,
-                    claim_id=claim.claim_id,
-                )
-            )
+        else:
+            issues.extend(_check_fact_assertion(claim, fact))
     if claim.semantically_verified:
         issues.append(
             ValidationIssue(
                 "semantic_overclaim",
-                "M3-A cannot mark citations as semantically verified.",
+                "mechanical citation checks are not semantic verification.",
                 claim_id=claim.claim_id,
             )
         )
@@ -266,17 +268,27 @@ def _check_offsets(
 ) -> list[ValidationIssue]:
     issues: list[ValidationIssue] = []
     document = pack.document_by_accession().get(chunk.accession)
-    cleaned = document.cleaned_text if document is not None else chunk.text
-    if claim.text_start is None or claim.text_end is None:
-        if claim.quoted_span and claim.quoted_span not in chunk.text:
-            issues.append(
-                ValidationIssue(
-                    "quote_mismatch",
-                    "quoted_span is not present in the cited chunk text.",
-                    ref_id=chunk.chunk_id,
-                    claim_id=claim.claim_id,
-                )
+    if claim.quoted_span and (claim.text_start is None or claim.text_end is None):
+        issues.append(
+            ValidationIssue(
+                "missing_offsets",
+                "quoted_span requires text_start and text_end inside the cited chunk.",
+                ref_id=chunk.chunk_id,
+                claim_id=claim.claim_id,
             )
+        )
+        return issues
+    if claim.text_start is None or claim.text_end is None:
+        return issues
+    if claim.text_start < chunk.text_start or claim.text_end > chunk.text_end:
+        issues.append(
+            ValidationIssue(
+                "chunk_range_mismatch",
+                "citation offsets are outside the referenced chunk cleaned-text range.",
+                ref_id=chunk.chunk_id,
+                claim_id=claim.claim_id,
+            )
+        )
         return issues
     if claim.text_start < 0 or claim.text_end < claim.text_start:
         issues.append(
@@ -288,7 +300,20 @@ def _check_offsets(
             )
         )
         return issues
+    local_start = claim.text_start - chunk.text_start
+    local_end = claim.text_end - chunk.text_start
+    chunk_slice = chunk.text[local_start:local_end]
+    if claim.quoted_span is not None and chunk_slice != claim.quoted_span:
+        issues.append(
+            ValidationIssue(
+                "quote_mismatch",
+                "quoted_span does not equal the cited chunk substring.",
+                ref_id=chunk.chunk_id,
+                claim_id=claim.claim_id,
+            )
+        )
     if document is not None:
+        cleaned = document.cleaned_text
         if claim.text_end > len(cleaned):
             issues.append(
                 ValidationIssue(
@@ -300,6 +325,15 @@ def _check_offsets(
             )
             return issues
         cited = cleaned[claim.text_start : claim.text_end]
+        if cited != chunk_slice:
+            issues.append(
+                ValidationIssue(
+                    "quote_mismatch",
+                    "chunk substring does not match cleaned_text at the cited offsets.",
+                    ref_id=chunk.chunk_id,
+                    claim_id=claim.claim_id,
+                )
+            )
         if claim.quoted_span is not None and cited != claim.quoted_span:
             issues.append(
                 ValidationIssue(
@@ -309,13 +343,80 @@ def _check_offsets(
                     claim_id=claim.claim_id,
                 )
             )
-    elif claim.quoted_span and claim.quoted_span not in chunk.text:
+    return issues
+
+
+def _check_fact_assertion(claim: ResearchClaim, fact: XbrlFactRecord) -> list[ValidationIssue]:
+    issues: list[ValidationIssue] = []
+    if not fact.unit.strip():
         issues.append(
             ValidationIssue(
-                "quote_mismatch",
-                "quoted_span is not present in the cited chunk text.",
-                ref_id=chunk.chunk_id,
+                "invalid_unit",
+                "XBRL fact is missing a unit.",
+                ref_id=fact.ref_id,
                 claim_id=claim.claim_id,
             )
         )
+    if claim.asserted_value is not None and not math.isclose(
+        claim.asserted_value, fact.value, rel_tol=0.0, abs_tol=1e-9
+    ):
+        issues.append(
+            ValidationIssue(
+                "fabricated_value",
+                "asserted_value does not match the referenced XBRL fact.",
+                ref_id=fact.ref_id,
+                claim_id=claim.claim_id,
+            )
+        )
+    if claim.asserted_unit is not None and claim.asserted_unit != fact.unit:
+        issues.append(
+            ValidationIssue(
+                "unit_mismatch",
+                "asserted_unit does not match the referenced XBRL fact.",
+                ref_id=fact.ref_id,
+                claim_id=claim.claim_id,
+            )
+        )
+    if claim.asserted_accession is not None and claim.asserted_accession != fact.accession:
+        issues.append(
+            ValidationIssue(
+                "accession_mismatch",
+                "asserted_accession does not match the referenced XBRL fact.",
+                ref_id=fact.ref_id,
+                claim_id=claim.claim_id,
+            )
+        )
+    if claim.asserted_period is not None:
+        allowed = {
+            fact.period_kind,
+            fact.fiscal_period or "",
+            fact.time.event_time.date().isoformat(),
+        }
+        if fact.period_start is not None:
+            allowed.add(fact.period_start.date().isoformat())
+        if claim.asserted_period not in allowed:
+            issues.append(
+                ValidationIssue(
+                    "period_mismatch",
+                    "asserted_period does not match the referenced XBRL fact.",
+                    ref_id=fact.ref_id,
+                    claim_id=claim.claim_id,
+                )
+            )
+    return issues
+
+
+def _check_forbidden_text(artifact: ResearchArtifact) -> list[ValidationIssue]:
+    blobs = [artifact.thesis, *artifact.observations, *artifact.bullish_hypotheses]
+    blobs.extend(claim.text for claim in artifact.claims)
+    issues: list[ValidationIssue] = []
+    for text in blobs:
+        if _FORBIDDEN.search(text):
+            issues.append(
+                ValidationIssue(
+                    "forbidden_output",
+                    "research output includes a rating, expected return, or order instruction.",
+                )
+            )
+            break
     return issues

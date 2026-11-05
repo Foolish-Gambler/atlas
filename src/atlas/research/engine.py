@@ -1,4 +1,4 @@
-"""Offline research pipeline: retrieve, mock-analyze, validate, snapshot. No orders."""
+"""Evidence-grounded research pipeline. No orders. LLM HTTP is opt-in."""
 
 from __future__ import annotations
 
@@ -8,7 +8,9 @@ from datetime import UTC, datetime
 
 from atlas.contracts import Provenance, ResearchArtifact, SourceKind, TimeIndex
 from atlas.ingest.snapshot import SnapshotPayload, SnapshotStore
+from atlas.research.errors import ResearchRejectedError
 from atlas.research.models import EvidencePack, ResearchQuery, ValidationReport
+from atlas.research.payload import payload_stats
 from atlas.research.provider import ResearchProvider, provider_from_name
 from atlas.research.retriever import SnapshotEvidenceRetriever
 from atlas.research.validator import EvidenceValidator
@@ -23,6 +25,7 @@ class ResearchRunResult:
     dataset_id: str
     revision: str
     simulated: bool
+    published: bool = False
 
 
 class ResearchEngine:
@@ -38,6 +41,48 @@ class ResearchEngine:
         self.provider = provider or provider_from_name("mock")
         self.validator = validator or EvidenceValidator()
 
+    def retrieve_pack(
+        self,
+        query: ResearchQuery,
+        *,
+        document_dataset: str,
+        document_revision: str,
+        financial_dataset: str,
+        financial_revision: str,
+    ) -> EvidencePack:
+        if len(query.question) > query.max_question_chars:
+            raise InvalidInputError("research question exceeds bound.")
+        return self.retriever.retrieve(
+            query,
+            document_dataset=document_dataset,
+            document_revision=document_revision,
+            financial_dataset=financial_dataset,
+            financial_revision=financial_revision,
+        )
+
+    def estimate(
+        self,
+        query: ResearchQuery,
+        *,
+        document_dataset: str,
+        document_revision: str,
+        financial_dataset: str,
+        financial_revision: str,
+    ) -> dict[str, object]:
+        pack = self.retrieve_pack(
+            query,
+            document_dataset=document_dataset,
+            document_revision=document_revision,
+            financial_dataset=financial_dataset,
+            financial_revision=financial_revision,
+        )
+        stats = payload_stats(query, pack)
+        stats["document_dataset"] = document_dataset
+        stats["document_revision"] = document_revision
+        stats["financial_dataset"] = financial_dataset
+        stats["financial_revision"] = financial_revision
+        return stats
+
     def analyze(
         self,
         query: ResearchQuery,
@@ -49,38 +94,49 @@ class ResearchEngine:
         output_dataset: str,
         output_revision: str,
         created_at: datetime | None = None,
+        save_failures: bool = False,
     ) -> ResearchRunResult:
         if (output_dataset, output_revision) in {
             (document_dataset, document_revision),
             (financial_dataset, financial_revision),
         }:
             raise InvalidInputError("research output must be a new immutable revision.")
-        pack = self.retriever.retrieve(
+        pack = self.retrieve_pack(
             query,
             document_dataset=document_dataset,
             document_revision=document_revision,
             financial_dataset=financial_dataset,
             financial_revision=financial_revision,
         )
-        if len(query.question) > query.max_question_chars:
-            raise InvalidInputError("research question exceeds bound.")
         response = self.provider.analyze(query, pack)
-        stamp = created_at or datetime.now(UTC)
+        generated_at = response.generated_at or created_at or datetime.now(UTC)
+        ingested_at = created_at or datetime.now(UTC)
+        available_time = max(generated_at, query.research_as_of)
+        if ingested_at < available_time:
+            ingested_at = available_time
+        llm_called = bool(response.llm_called)
+        simulated = bool(response.simulated) and not llm_called
+        retrospective = bool(query.retrospective)
+        usable = (not retrospective) and True
+        source_kind = SourceKind.SIMULATED if simulated else SourceKind.VENDOR_READ_ONLY
+        vendor = "atlas_research_mock" if simulated else "openai"
         artifact_id = _artifact_id(query, pack, self.provider.provider_id)
+        docs_src = self.store.load(document_dataset, document_revision)
+        fins_src = self.store.load(financial_dataset, financial_revision)
         draft = ResearchArtifact(
             artifact_id=artifact_id,
             model_id=self.provider.model_id,
-            model_version=self.provider.model_version,
+            model_version=response.model_version or self.provider.model_version,
             time=TimeIndex(
-                event_time=query.research_as_of,
-                available_time=query.research_as_of,
-                ingested_time=stamp,
+                event_time=generated_at,
+                available_time=available_time,
+                ingested_time=ingested_at,
             ),
             provenance=Provenance(
-                source_kind=SourceKind.SIMULATED,
+                source_kind=source_kind,
                 dataset_id=output_dataset,
                 revision=output_revision,
-                vendor="atlas_research_mock",
+                vendor=vendor,
             ),
             symbols=(normalize_symbol(query.symbol),),
             thesis=response.thesis,
@@ -97,9 +153,22 @@ class ResearchEngine:
             uncertainties=response.uncertainties,
             validation_status="unchecked",
             provider_id=self.provider.provider_id,
-            simulated=True,
+            simulated=simulated,
+            research_as_of=query.research_as_of,
+            generated_at=generated_at,
+            retrospective=retrospective,
+            llm_called=llm_called,
+            prompt_version=response.prompt_version,
+            schema_version=response.schema_version,
+            response_id=response.response_id,
+            input_tokens=response.input_tokens,
+            output_tokens=response.output_tokens,
+            request_count=response.request_count,
+            estimated_cost=response.estimated_cost,
+            usable_for_signals=usable,
         )
         report = self.validator.validate(draft, pack)
+        valid = report.valid
         claims = tuple(
             replace(
                 claim,
@@ -111,43 +180,114 @@ class ResearchEngine:
         artifact = replace(
             draft,
             claims=claims,
-            validation_status="valid" if report.valid else "invalid",
+            validation_status="valid" if valid else "invalid",
             validation_errors=tuple(f"{item.code}: {item.message}" for item in report.issues),
+            usable_for_signals=usable and valid,
         )
-        metadata = {
-            "provider_id": self.provider.provider_id,
-            "model_id": self.provider.model_id,
-            "model_version": self.provider.model_version,
-            "simulated": True,
-            "llm_called": False,
-            "untrusted_evidence": True,
-            "semantically_verified": False,
-            "document_dataset": document_dataset,
-            "document_revision": document_revision,
-            "financial_dataset": financial_dataset,
-            "financial_revision": financial_revision,
-            "research_as_of": query.research_as_of.isoformat(),
-            "price_disclaimer": (
-                "Mock research only. Not LLM analysis, not investment advice, not an order."
-            ),
-        }
-        self.store.create(
-            output_dataset,
-            output_revision,
-            SnapshotPayload(research=(artifact,)),
-            source_kind=SourceKind.SIMULATED,
-            vendor="atlas_research_mock",
-            created_at=stamp,
-            metadata=metadata,
+        metadata = _metadata(
+            query,
+            pack,
+            artifact,
+            document_dataset=document_dataset,
+            document_revision=document_revision,
+            financial_dataset=financial_dataset,
+            financial_revision=financial_revision,
+            docs_files=len(docs_src.manifest.files),
+            fins_files=len(fins_src.manifest.files),
         )
+        published = False
+        dataset_id = output_dataset
+        revision = output_revision
+        if valid:
+            self.store.create(
+                output_dataset,
+                output_revision,
+                SnapshotPayload(research=(artifact,)),
+                source_kind=source_kind,
+                vendor=vendor,
+                created_at=ingested_at,
+                metadata=metadata,
+            )
+            published = True
+        elif save_failures:
+            dataset_id = f"{output_dataset}-unusable"
+            metadata = {**metadata, "usable_for_signals": False, "usable_for_training": False}
+            failure = replace(artifact, usable_for_signals=False, retrospective=True)
+            self.store.create(
+                dataset_id,
+                output_revision,
+                SnapshotPayload(research=(failure,)),
+                source_kind=SourceKind.SIMULATED,
+                vendor="atlas_research_rejected",
+                created_at=ingested_at,
+                metadata=metadata,
+            )
+            artifact = failure
+            published = False
+            raise ResearchRejectedError(
+                "research failed validation and was stored only as an unusable diagnostic."
+            )
+        else:
+            raise ResearchRejectedError(
+                "research failed validation and was not published: "
+                + "; ".join(artifact.validation_errors[:8])
+            )
         return ResearchRunResult(
             artifact=artifact,
             pack=pack,
             validation=report,
-            dataset_id=output_dataset,
-            revision=output_revision,
-            simulated=True,
+            dataset_id=dataset_id,
+            revision=revision,
+            simulated=simulated,
+            published=published,
         )
+
+
+def _metadata(
+    query: ResearchQuery,
+    pack: EvidencePack,
+    artifact: ResearchArtifact,
+    *,
+    document_dataset: str,
+    document_revision: str,
+    financial_dataset: str,
+    financial_revision: str,
+    docs_files: int,
+    fins_files: int,
+) -> dict[str, object]:
+    return {
+        "provider_id": artifact.provider_id,
+        "model_id": artifact.model_id,
+        "model_version": artifact.model_version,
+        "simulated": artifact.simulated,
+        "llm_called": artifact.llm_called,
+        "untrusted_evidence": True,
+        "semantically_verified": False,
+        "retrospective": artifact.retrospective,
+        "usable_for_signals": artifact.usable_for_signals,
+        "usable_for_training": artifact.usable_for_signals,
+        "document_dataset": document_dataset,
+        "document_revision": document_revision,
+        "financial_dataset": financial_dataset,
+        "financial_revision": financial_revision,
+        "document_snapshot_files": docs_files,
+        "financial_snapshot_files": fins_files,
+        "research_as_of": query.research_as_of.isoformat(),
+        "generated_at": artifact.generated_at.isoformat() if artifact.generated_at else None,
+        "prompt_version": artifact.prompt_version,
+        "schema_version": artifact.schema_version,
+        "response_id": artifact.response_id,
+        "input_tokens": artifact.input_tokens,
+        "output_tokens": artifact.output_tokens,
+        "request_count": artifact.request_count,
+        "estimated_cost": artifact.estimated_cost,
+        "chunks": len(pack.chunks),
+        "facts": len(pack.facts),
+        "price_disclaimer": (
+            "Not investment advice and not an order. LLM output is advisory until "
+            "deterministic risk checks; this pipeline never submits trades."
+        ),
+    }
 
 
 def _artifact_id(query: ResearchQuery, pack: EvidencePack, provider_id: str) -> str:

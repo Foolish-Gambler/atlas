@@ -461,6 +461,10 @@ class ResearchClaim:
     fact_id: str | None = None
     text_start: int | None = None
     text_end: int | None = None
+    asserted_value: float | None = None
+    asserted_unit: str | None = None
+    asserted_period: str | None = None
+    asserted_accession: str | None = None
     citation_mechanically_valid: bool = False
     semantically_verified: bool = False
 
@@ -474,6 +478,16 @@ class ResearchClaim:
             object.__setattr__(self, "chunk_id", None)
         if self.fact_id == "":
             object.__setattr__(self, "fact_id", None)
+        if self.asserted_unit == "":
+            object.__setattr__(self, "asserted_unit", None)
+        if self.asserted_period == "":
+            object.__setattr__(self, "asserted_period", None)
+        if self.asserted_accession == "":
+            object.__setattr__(self, "asserted_accession", None)
+        if self.asserted_value is not None:
+            object.__setattr__(
+                self, "asserted_value", require_finite(self.asserted_value, "asserted_value")
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -501,6 +515,18 @@ class ResearchArtifact:
     provider_id: str = "unspecified"
     simulated: bool = True
     untrusted_evidence: bool = True
+    research_as_of: datetime | None = None
+    generated_at: datetime | None = None
+    retrospective: bool = False
+    llm_called: bool = False
+    prompt_version: str | None = None
+    schema_version: str | None = None
+    response_id: str | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    request_count: int = 0
+    estimated_cost: float | None = None
+    usable_for_signals: bool = True
 
     def __post_init__(self) -> None:
         if (
@@ -519,6 +545,26 @@ class ResearchArtifact:
         if self.validation_status not in {"unchecked", "valid", "invalid"}:
             raise InvalidInputError("validation_status must be unchecked, valid, or invalid.")
         object.__setattr__(self, "untrusted_evidence", True)
+        if self.research_as_of is not None:
+            object.__setattr__(
+                self,
+                "research_as_of",
+                require_aware_datetime(self.research_as_of, "research_as_of"),
+            )
+        if self.generated_at is not None:
+            object.__setattr__(
+                self, "generated_at", require_aware_datetime(self.generated_at, "generated_at")
+            )
+        if self.prompt_version == "":
+            object.__setattr__(self, "prompt_version", None)
+        if self.schema_version == "":
+            object.__setattr__(self, "schema_version", None)
+        if self.response_id == "":
+            object.__setattr__(self, "response_id", None)
+        if self.llm_called:
+            object.__setattr__(self, "simulated", False)
+        if self.retrospective:
+            object.__setattr__(self, "usable_for_signals", False)
 
 
 @dataclass(frozen=True, slots=True)

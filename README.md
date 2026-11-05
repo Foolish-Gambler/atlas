@@ -51,3 +51,5 @@ uv run --env-file .env atlas alpaca fetch-once `
 ```
 
 Unset `ATLAS_ALLOW_NETWORK` afterwards. Mocked ingest (`atlas alpaca ingest-recorded`) does not open a socket.
+
+LLM research is also **off by default**. `atlas research analyze --provider mock` never calls OpenAI. `--provider openai --dry-run` estimates evidence size without HTTP. A paid Responses API call requires an explicit operator approval, `ATLAS_ALLOW_LLM_NETWORK=1`, `ATLAS_OPENAI_MODEL`, and `OPENAI_API_KEY`. See [docs/M3B_OPENAI_RESEARCH.md](docs/M3B_OPENAI_RESEARCH.md).

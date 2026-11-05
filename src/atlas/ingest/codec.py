@@ -37,6 +37,14 @@ def parse_datetime(value: str, name: str) -> datetime:
     return parsed
 
 
+def _optional_dt(value: object, name: str) -> datetime | None:
+    if value in (None, ""):
+        return None
+    if not isinstance(value, str):
+        raise InvalidInputError(f"{name} must be an ISO-8601 datetime string.")
+    return parse_datetime(value, name)
+
+
 def require_time_index(row: dict[str, Any], *, require_ingested: bool) -> TimeIndex:
     ingested_raw = row.get("ingested_time")
     if require_ingested and not ingested_raw:
@@ -320,6 +328,18 @@ def research_to_row(record: ResearchArtifact) -> dict[str, Any]:
         "provider_id": record.provider_id,
         "simulated": record.simulated,
         "untrusted_evidence": True,
+        "research_as_of": record.research_as_of.isoformat() if record.research_as_of else None,
+        "generated_at": record.generated_at.isoformat() if record.generated_at else None,
+        "retrospective": record.retrospective,
+        "llm_called": record.llm_called,
+        "prompt_version": record.prompt_version,
+        "schema_version": record.schema_version,
+        "response_id": record.response_id,
+        "input_tokens": record.input_tokens,
+        "output_tokens": record.output_tokens,
+        "request_count": record.request_count,
+        "estimated_cost": record.estimated_cost,
+        "usable_for_signals": record.usable_for_signals,
         **time_to_row(record.time),
     }
 
@@ -352,6 +372,18 @@ def parse_research(
         provider_id=str(row.get("provider_id") or "unspecified"),
         simulated=bool(row.get("simulated", True)),
         untrusted_evidence=True,
+        research_as_of=_optional_dt(row.get("research_as_of"), "research_as_of"),
+        generated_at=_optional_dt(row.get("generated_at"), "generated_at"),
+        retrospective=bool(row.get("retrospective", False)),
+        llm_called=bool(row.get("llm_called", False)),
+        prompt_version=row.get("prompt_version"),
+        schema_version=row.get("schema_version"),
+        response_id=row.get("response_id"),
+        input_tokens=row.get("input_tokens"),
+        output_tokens=row.get("output_tokens"),
+        request_count=int(row.get("request_count") or 0),
+        estimated_cost=row.get("estimated_cost"),
+        usable_for_signals=bool(row.get("usable_for_signals", True)),
     )
 
 
@@ -366,6 +398,10 @@ def _claim_to_row(claim: ResearchClaim) -> dict[str, Any]:
         "fact_id": claim.fact_id,
         "text_start": claim.text_start,
         "text_end": claim.text_end,
+        "asserted_value": claim.asserted_value,
+        "asserted_unit": claim.asserted_unit,
+        "asserted_period": claim.asserted_period,
+        "asserted_accession": claim.asserted_accession,
         "citation_mechanically_valid": claim.citation_mechanically_valid,
         "semantically_verified": False,
     }
@@ -382,6 +418,10 @@ def _parse_claim(row: dict[str, Any]) -> ResearchClaim:
         fact_id=row.get("fact_id"),
         text_start=row.get("text_start"),
         text_end=row.get("text_end"),
+        asserted_value=row.get("asserted_value"),
+        asserted_unit=row.get("asserted_unit"),
+        asserted_period=row.get("asserted_period"),
+        asserted_accession=row.get("asserted_accession"),
         citation_mechanically_valid=bool(row.get("citation_mechanically_valid", False)),
         semantically_verified=False,
     )

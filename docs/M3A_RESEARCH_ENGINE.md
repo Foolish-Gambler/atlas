@@ -20,7 +20,7 @@ atlas research analyze --root DIR --symbol AAPL \
   --accession 0000320193-26-000020
 ```
 
-`--provider mock` is the only implemented provider. OpenAI is a refused stub for M3-B.
+`--provider mock` remains the default. OpenAI is implemented in M3-B behind `ATLAS_ALLOW_LLM_NETWORK` (`docs/M3B_OPENAI_RESEARCH.md`).
 
 ## Evidence refs
 
